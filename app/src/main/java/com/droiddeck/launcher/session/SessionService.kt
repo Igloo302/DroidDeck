@@ -487,6 +487,15 @@ class SessionService : Service() {
             }
             val program = programStatus(sessionRoot)
             Log.i(TAG, "session ended: $status" + if (program != null) " (program $program)" else "")
+            if (SessionState.running && !SessionState.firstFrameSeen && SessionState.failureCode == null) {
+                com.droiddeck.launcher.gpu.TurnipStartupFailure.unsupportedChipId(sessionLog)?.let { chip ->
+                    SessionEvents.fail(
+                        com.droiddeck.launcher.gpu.TurnipStartupFailure.CODE,
+                        getString(R.string.session_end_gpu_unsupported, com.droiddeck.launcher.gpu.GpuInfo.detect().displayName(this), chip),
+                        program ?: status ?: -1,
+                    )
+                }
+            }
             stopSession(program ?: status ?: -1)
         }, null)
         Log.i(TAG, "session pid $pid, log ${sessionLog.path}")
@@ -1376,7 +1385,7 @@ class SessionService : Service() {
             runCatching { com.droiddeck.launcher.agent.AgentEnv.endSession(this) }
                 .onFailure { Log.w(TAG, "clearing the agent's session environment", it) }
             releaseLocks()
-            if (status == 0) {
+            if (status == 0 && SessionState.failureCode == null) {
                 SessionEvents.transition(SessionPhase.IDLE, "session.stopped", mapOf("status" to status))
             } else {
                 val code = SessionState.failureCode ?: "GUEST_EXIT"

@@ -16,8 +16,8 @@ java_dir=${JAVA_HOME:-"/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents
 image_name=${DROIDDECK_BUILD_IMAGE:-droiddeck-local-cross:24.04-v3}
 build_variant=${DROIDDECK_BUILD_VARIANT:-release}
 case "$build_variant" in
-    debug) gradle_task=assembleDebug ;;
-    release) gradle_task=assembleRelease ;;
+    debug) gradle_task=:app:assembleDebug ;;
+    release) gradle_task=:app:assembleRelease ;;
     *) echo "DROIDDECK_BUILD_VARIANT must be debug or release" >&2; exit 1 ;;
 esac
 
@@ -163,7 +163,7 @@ if restore_step x86-preloads "${x86_key}" "${linuxfs_dir}"; then :; else
 fi
 
 vr_out="${linuxfs_dir}/usr/local/lib/droiddeck-vr"
-vr_key=$(inputs_hash "${image_id} ${ndk_version} ${VK_INCLUDE:-}" tools/vr app/src/main/cpp/waylandcomp/generated/xdg-shell-protocol.c)
+vr_key=$(inputs_hash "${image_id} ${ndk_version} ${VK_INCLUDE:-}" tools/vr xr-core/src/main/cpp app/src/main/cpp/waylandcomp/generated/xdg-shell-protocol.c)
 if ! restore_step vr "${vr_key}" "${vr_out}"; then
     DROIDDECK_BUILD_IMAGE="${image_name}" "${repo_root}/tools/vr/build.sh" "${vr_out}"
     save_step vr "${vr_key}" "${vr_out}"
@@ -385,9 +385,9 @@ done
 
 readelf_path=$(find "${NDK}/toolchains/llvm/prebuilt" -name llvm-readelf | head -1)
 [[ -x "${readelf_path}" ]] || { echo "NDK llvm-readelf is missing" >&2; exit 1; }
-stores_check=()
+stores_check=(python3 tools/release/check_android_libraries.py "${apk}" --readelf "${readelf_path}")
 [[ "${DROIDDECK_SKIP_RUST:-0}" != 1 ]] || stores_check+=(--without-stores)
-python3 tools/release/check_android_libraries.py "${apk}" --readelf "${readelf_path}" "${stores_check[@]}"
+"${stores_check[@]}"
 git diff --exit-code -- app/src/main/rust/stores/Cargo.lock
 
 build_tools=$(find "${sdk_dir}/build-tools" -mindepth 1 -maxdepth 1 -type d -print | sort -V | tail -1)

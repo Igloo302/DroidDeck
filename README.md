@@ -41,6 +41,10 @@ To reuse that build, pass `--rebuilt-vr build/windows-setup/vr`. Preparation ver
 
 Run the helper and preload regression suite with `bash tools/test_local.sh`. On macOS it runs in Linux through Docker, matching the helpers' runtime and CI instead of compiling Linux preloads against macOS headers.
 
+This fork adds experimental Android XR support, sharing its OpenXR runtime, hand input and SteamVR skeletal bridge with Quest. XREAL AURA is the current hardware target. Steam, immersive SteamVR and Aircar have been tested on AURA; the tester confirmed the city scene, head tracking and gamepad control. An optional [Adreno 831 Turnip driver prototype](tools/gpu/README.md), installed through the existing driver ZIP importer, resolves the observed right-eye corruption. Dashboard head-motion jitter remains intermittent, and bare-hand orientation, dragging and menu recall still need complete hardware acceptance. These results do not establish general VR game compatibility or full Adreno 831 support.
+
+See the [implementation](docs/development/android-xr.md) and [build/test runbook](docs/development/android-xr-runbook.md). The independent `xr-smoke` app exercises the shared native runtime without preparing the full Linux guest.
+
 ## Limits
 
 Compatibility and performance vary by device; hardware validation is limited. Desktop compositing uses software rendering. Firefox sandboxing is reduced under proot. Logs are kept app-private (`files/logs/`, the last 30 sessions); **Share logs** packs the newest session, with the stores and tool logs, into one scrubbed zip.

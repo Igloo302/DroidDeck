@@ -1,9 +1,12 @@
 #define _GNU_SOURCE
+#undef NDEBUG
 #include <assert.h>
 #include <errno.h>
 #include <linux/capability.h>
 #include <stdint.h>
+#include <pthread.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -45,11 +48,40 @@ static void check(int compositor) {
     assert(setrlimit(-1, &before) == -1 && errno == EINVAL);
 }
 
+static void check_display_priority(int compositor, const char *name) {
+    program_invocation_short_name = compositor ? "vrcompositor" : "vrserver";
+    struct rlimit nice;
+    assert(getrlimit(RLIMIT_NICE, &nice) == 0);
+    const id_t tid = (id_t)syscall(SYS_gettid);
+    const int before = getpriority(PRIO_PROCESS, tid);
+    assert(pthread_setname_np(pthread_self(), name) == 0);
+    const int after = getpriority(PRIO_PROCESS, tid);
+    const int target = before < -8 ? before : -8;
+    if (compositor && strcmp(name, "background") && realtime_unavailable() && nice.rlim_cur >= 28)
+        assert(after == target);
+    else assert(after == before);
+    int policy;
+    struct sched_param parameter;
+    assert(pthread_getschedparam(pthread_self(), &policy, &parameter) == 0);
+    assert(policy == SCHED_OTHER && parameter.sched_priority == 0);
+    assert(pthread_setname_np(pthread_self(), "name-too-long-for-linux") == ERANGE);
+    assert(getpriority(PRIO_PROCESS, tid) == after);
+}
+
 int main(void) {
     for (int compositor = 0; compositor <= 1; ++compositor) {
         pid_t child = fork();
         assert(child >= 0);
         if (!child) { check(compositor); _exit(0); }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+    const char *names[] = {"RenderThread", "SignalThread", "VulkanVblankThr", "XRFrameSender", "background"};
+    for (int compositor = 0; compositor <= 1; ++compositor) for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        pid_t child = fork();
+        assert(child >= 0);
+        if (!child) { check_display_priority(compositor, names[i]); _exit(0); }
         int status;
         assert(waitpid(child, &status, 0) == child);
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

@@ -1856,6 +1856,8 @@
 
     <string name="gpuinfo_not_adreno">不是 Adreno GPU</string>
     <string name="gpuinfo_supported">受支持</string>
+    <string name="gpuinfo_driver_unverified">需要兼容 Adreno 831 的 Linux 驱动；尚未验证支持</string>
+    <string name="session_end_gpu_unsupported">所选 Linux Vulkan 驱动无法识别 %1$s（芯片 %2$s），无法启动显示服务。需要兼容此 GPU 的 Linux 驱动。</string>
     <string name="gpuinfo_experimental">实验性：其驱动为测试构建</string>
     <string name="gpuinfo_below_tested">低于已测试的硬件（Adreno 725 及更新）：可能无法运行</string>
     <string name="gpuinfo_unsupported">不受支持：DroidDeck 需要 Adreno（骁龙）GPU</string>

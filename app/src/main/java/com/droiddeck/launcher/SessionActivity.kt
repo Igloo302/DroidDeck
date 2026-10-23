@@ -347,6 +347,10 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var drawerTextureAnisotropy by mutableStateOf<Int?>(null)
     private var drawerTextureLodBias by mutableStateOf<String?>(null)
     private var lossless by mutableStateOf(Lossless.State.NONE)
+    private val xrHandPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        if (com.droiddeck.launcher.xr.AndroidXrEntry.readiness(this).canProbe)
+            startActivity(android.content.Intent(this, AndroidXrActivity::class.java))
+    }
     private val pickLossless = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         if (r.resultCode == RESULT_OK) InAppFilePicker.pickedFile(r.data)?.let { importLossless(it) }
     }
@@ -764,7 +768,8 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
                         com.droiddeck.launcher.glasses.GlassesMenuMirror.recenter()
                     },
                     steamVr = steamVrStatus,
-                    immersiveSteamVr = com.droiddeck.launcher.session.QuestExperimental.isSupported(),
+                    immersiveSteamVr = com.droiddeck.launcher.xr.XrPlatform.current(this@SessionActivity) !=
+                        com.droiddeck.xr.XrPlatform.NONE,
                     onSteamVr = { action -> steamVrAction(action) },
                     textureAnisotropy = if (drawerGameProfileId == null) textureAnisotropy else drawerTextureAnisotropy,
                     textureLodBias = if (drawerGameProfileId == null) textureLodBias else drawerTextureLodBias,
@@ -1517,7 +1522,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         if (holder !== outputHolder()) return
-        if (installingRuntime || SessionState.stopRequested || ended) return
+        if (installingRuntime || SessionState.stopRequested || ended || SessionState.phase == SessionPhase.STOPPING) return
         if (!SessionState.running) {
             SessionEvents.transition(SessionPhase.STARTING_COMPOSITOR, "compositor.starting")
         }
@@ -1793,7 +1798,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         closeSecondScreen(reset = true)
         updateGlassesScreen()
         updateHeadTracker()
-        if (status == 0) {
+        if (status == 0 && SessionState.failureCode == null) {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 SessionState.relaunch?.let { next ->
@@ -1808,7 +1813,9 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
             return
         }
         Thread({
-            val hint = runtimeDamageHint() ?: sessionEndHint(SessionState.logFile)
+            val gpuHint = if (SessionState.failureCode == com.droiddeck.launcher.gpu.TurnipStartupFailure.CODE)
+                SessionState.failureMessage?.let { EndHint(it, evenOnSuccess = true) } else null
+            val hint = gpuHint ?: runtimeDamageHint() ?: sessionEndHint(SessionState.logFile)
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 showEnded(status, hint)
@@ -2895,9 +2902,27 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun steamVrAction(action: String) {
-        if (action == "start" && com.droiddeck.launcher.session.QuestExperimental.isSupported()) {
-            startActivity(android.content.Intent(this, QuestXrActivity::class.java))
-            return
+        if (action == "start") {
+            when (com.droiddeck.launcher.xr.XrPlatform.current(this)) {
+                com.droiddeck.xr.XrPlatform.QUEST -> {
+                    startActivity(android.content.Intent(this, QuestXrActivity::class.java))
+                    return
+                }
+                com.droiddeck.xr.XrPlatform.ANDROID_XR -> {
+                    val readiness = com.droiddeck.launcher.xr.AndroidXrEntry.readiness(this)
+                    if (readiness.canProbe) {
+                        val permission = "android.permission.HAND_TRACKING"
+                        if (checkSelfPermission(permission) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                            xrHandPermission.launch(permission)
+                        else startActivity(android.content.Intent(this, AndroidXrActivity::class.java))
+                    } else {
+                        Log.i(TAG, "Android XR launch blocked: $readiness")
+                        Toast.makeText(this, R.string.android_xr_not_ready, Toast.LENGTH_LONG).show()
+                    }
+                    return
+                }
+                com.droiddeck.xr.XrPlatform.NONE -> Unit
+            }
         }
         val request = ++steamVrRequestGeneration
         val session = SessionState.sessionId
