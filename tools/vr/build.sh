@@ -37,6 +37,9 @@ compile() {
         cc -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -pthread -Ibuild/vr/include \
             -o build/vr/test_compositor_submit tools/vr/tests/test_compositor_submit.c -ldl
         build/vr/test_compositor_submit
+        cc -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -pthread -Ibuild/vr/include \
+            -o build/vr/test_display_timing tools/vr/tests/test_display_timing.c -ldl
+        build/vr/test_display_timing
         c++ -std=c++17 -O2 -Wall -Wextra -Werror -Itools/vr/src \
             -o build/vr/test_render_target tools/vr/tests/test_render_target.cpp
         build/vr/test_render_target
@@ -53,8 +56,8 @@ compile() {
             -o build/vr/test_optical_controller tools/vr/tests/test_optical_controller.cpp
         build/vr/test_optical_controller
         cc -shared -fPIC -O2 -Wall -Wextra -Werror \
-            -o build/vr/libdroiddeck_vr_scheduling.so tools/vr/src/scheduling.c -ldl
-        cc -O2 -Wall -Wextra -Werror -o build/vr/test_scheduling tools/vr/tests/test_scheduling.c
+            -o build/vr/libdroiddeck_vr_scheduling.so tools/vr/src/scheduling.c -ldl -pthread
+        cc -O2 -Wall -Wextra -Werror -pthread -o build/vr/test_scheduling tools/vr/tests/test_scheduling.c
         LD_PRELOAD="$PWD/build/vr/libdroiddeck_vr_scheduling.so" build/vr/test_scheduling
         c++ -std=c++17 -O2 -Wall -Wextra -Werror -Wno-unused-parameter -Itools/vr/src \
             -o build/vr/test_joycon tools/vr/tests/test_joycon.cpp
@@ -81,7 +84,7 @@ compile() {
             -static-libstdc++ -static-libgcc -Wl,-z,defs -Wl,-z,nodelete -Ibuild/vr/include \
             -o build/vr/out/layer/libVkLayer_droiddeck_vr.so build/vr/vk_layer.o tools/vr/src/wsi_capture.cpp -ldl
         aarch64-linux-gnu-gcc -shared -fPIC -O2 -Wall -Wextra -Werror -Wl,-z,defs \
-            -o build/vr/out/layer/libdroiddeck_vr_scheduling.so tools/vr/src/scheduling.c -ldl
+            -o build/vr/out/layer/libdroiddeck_vr_scheduling.so tools/vr/src/scheduling.c -ldl -pthread
         aarch64-linux-gnu-strip --strip-unneeded build/vr/out/droiddeck/bin/linuxarm64/driver_droiddeck.so \
             build/vr/out/layer/libVkLayer_droiddeck_vr.so build/vr/out/layer/libdroiddeck_vr_scheduling.so')
     if [ "$native" = 1 ]; then

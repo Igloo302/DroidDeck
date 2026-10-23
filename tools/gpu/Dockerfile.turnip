@@ -1,0 +1,14 @@
+FROM ubuntu:24.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential git ninja-build pkg-config python3-venv python3-mako python3-yaml \
+    python3-packaging bison flex libdrm-dev libexpat1-dev libzstd-dev zlib1g-dev \
+    libwayland-dev wayland-protocols libx11-xcb-dev libxcb-dri3-dev libxcb-present-dev \
+    libxcb-sync-dev libxcb-xfixes0-dev libxcb-shm0-dev libxcb-randr0-dev \
+    libxcb-keysyms1-dev libxshmfence-dev libvulkan-dev glslang-tools \
+    ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv --system-site-packages /opt/mesa-python && \
+    /opt/mesa-python/bin/pip install --no-cache-dir meson==1.9.1
+ENV PATH=/opt/mesa-python/bin:$PATH
+WORKDIR /work
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libxrandr-dev clang-18 lld-18 llvm-18 && rm -rf /var/lib/apt/lists/*
