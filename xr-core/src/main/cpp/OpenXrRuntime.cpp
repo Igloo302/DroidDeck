@@ -30,11 +30,15 @@
 #include "OpenXrAndroid.h"
 #include "OpenXrCompatibility.h"
 #include "MappedGuestXrAdapter.h"
+#include "XrJoyConInput.h"
 #include "xr_skeleton.h"
 #include "Json.h"
 #include "ScopeExit.h"
 #include "HandGloveRenderer.h"
 #include <algorithm>
+extern "C" {
+#include "clock_domain.h"
+}
 
 using namespace droiddeck::xr;
 
@@ -68,6 +72,7 @@ public:
         gamepadMotion_ = env_->GetMethodID(type, "onXrGamepadMotion", "(IIIJJ[F)Z");
         gamepadFocus_ = env_->GetMethodID(type, "onXrInputFocus", "(Z)V");
         gamepadMenu_ = env_->GetMethodID(type, "onXrGamepadMenu", "()I");
+        joyConState_ = env_->GetMethodID(type, "onXrJoyConState", "()[I");
         handModel_ = env_->GetMethodID(type, "onXrHandModel", "(I)[B");
         showHands_ = env_->GetMethodID(type, "onXrShowHands", "()Z");
         env_->DeleteLocalRef(type);
@@ -81,6 +86,16 @@ public:
         if (!gamepadMenu_) return 0;
         const auto result = env_->CallIntMethod(app_->activity->clazz, gamepadMenu_); checked();
         return uint32_t(result);
+    }
+    JoyConSnapshot joyConState() {
+        JoyConSnapshot values{};
+        auto state = static_cast<jintArray>(env_->CallObjectMethod(app_->activity->clazz, joyConState_));
+        checked();
+        if (!state) return values;
+        if (env_->GetArrayLength(state) == values.size())
+            env_->GetIntArrayRegion(state, 0, values.size(), values.data());
+        env_->DeleteLocalRef(state); checked();
+        return values;
     }
     std::vector<uint8_t> handModel(int hand) {
         auto bytes = static_cast<jbyteArray>(env_->CallObjectMethod(app_->activity->clazz, handModel_, jint(hand)));
@@ -150,7 +165,7 @@ private:
     android_app *app_;
     JNIEnv *env_;
     jmethodID gamepadKey_ = nullptr, gamepadMotion_ = nullptr, gamepadFocus_ = nullptr, gamepadMenu_ = nullptr;
-    jmethodID handModel_ = nullptr, showHands_ = nullptr;
+    jmethodID handModel_ = nullptr, showHands_ = nullptr, joyConState_ = nullptr;
     jmethodID active_ = nullptr, frame_ = nullptr, status_ = nullptr, error_ = nullptr;
 };
 }
@@ -186,7 +201,11 @@ public:
                 pollTimeout = 0;
             }
             pollEvents();
-            if (running_ && !app_->destroyRequested) frame();
+            if (!app_->destroyRequested && !exit_) {
+                if (running_) frame();
+                // SteamVR can still present while Android prepares to suspend the guest.
+                else gpuFrames_.Discard();
+            }
         }
         if (exit_ && !app_->destroyRequested) ANativeActivity_finish(app_->activity);
     }
@@ -203,7 +222,7 @@ public:
             "\"headPosition\":[%.6f,%.6f,%.6f],\"controllersActive\":[%s,%s],\"handsActive\":[%s,%s],"
             "\"periodNs\":%lld,\"surfaceSwapchain\":%s,\"source\":\"%s\",\"guestFrames\":%lld,\"steamvrState\":%d,"
             "\"receivedFrames\":%llu,\"rejectedFrames\":%llu,\"uploadedFrames\":%llu,\"sourceFrameId\":%llu,"
-            "\"gpuReceivedFrames\":%llu,\"gpuDroppedFrames\":%llu,\"gpuAsyncCompletion\":%s,\"gpuCompletionFailures\":%llu,\"gpuVerifiedFrameId\":%llu,\"gpuChecksum\":%u,\"error\":%s,\"runtime\":%s,\"runtimeVersion\":%s,\"inputMode\":\"%s\",\"generation\":%llu,\"originEpoch\":%llu,\"profiles\":[%s,%s],\"handPinch\":[%g,%g],\"handSelect\":[%g,%g],\"handPinchPresses\":[%llu,%llu],\"handPinchReleases\":[%llu,%llu],\"floorKnown\":%s,\"handProviders\":[%s,%s],\"eyeSeparationMeters\":%g,\"skeletonActive\":[%u,%u],\"jointPermission\":%s,\"transferMs\":%g,\"sourceAgeMs\":%g,\"gamepadKeyEvents\":%llu,\"gamepadMotionEvents\":%llu,\"gamepadMenuSequence\":%u,\"handMeshReady\":%s,\"handMeshVisible\":%s,\"handMeshDraws\":%llu}\n",
+            "\"gpuReceivedFrames\":%llu,\"gpuDroppedFrames\":%llu,\"gpuAsyncCompletion\":%s,\"gpuCompletionFailures\":%llu,\"gpuVerifiedFrameId\":%llu,\"gpuChecksum\":%u,\"error\":%s,\"runtime\":%s,\"runtimeVersion\":%s,\"inputMode\":\"%s\",\"generation\":%llu,\"originEpoch\":%llu,\"profiles\":[%s,%s],\"handPinch\":[%g,%g],\"handSelect\":[%g,%g],\"handPinchPresses\":[%llu,%llu],\"handPinchReleases\":[%llu,%llu],\"floorKnown\":%s,\"handProviders\":[%s,%s],\"eyeSeparationMeters\":%g,\"skeletonActive\":[%u,%u],\"jointPermission\":%s,\"transferMs\":%g,\"sourceAgeMs\":%g,\"gamepadKeyEvents\":%llu,\"gamepadMotionEvents\":%llu,\"gamepadMenuSequence\":%u,\"handMeshReady\":%s,\"handMeshVisible\":%s,\"handMeshDraws\":%llu,\"joyConActive\":[%u,%u],\"joyConOrientationFlags\":[%u,%u]}\n",
             (unsigned long long)frames_, (unsigned long long)rendered_, state_,
             (unsigned long long)head_.locationFlags,
             finite(head_.pose.position.x), finite(head_.pose.position.y), finite(head_.pose.position.z),
@@ -225,7 +244,8 @@ public:
             (unsigned long long)pinchReleases_[0], (unsigned long long)pinchReleases_[1], floorKnown_ ? "true" : "false", jsonString(handProviders_[0]).c_str(), jsonString(handProviders_[1]).c_str(),
             finite(eyeSeparation_), skeleton_.active[0], skeleton_.active[1], jointPermission_ ? "true" : "false", finite(transferMs_), finite(sourceAgeMs_),
             (unsigned long long)gamepadKeys_, (unsigned long long)gamepadMotions_, handPacket_.gamepad_menu_sequence,
-            handVisuals_.ready() ? "true" : "false", showHandVisuals_ ? "true" : "false", (unsigned long long)handVisualDraws_);
+            handVisuals_.ready() ? "true" : "false", showHandVisuals_ ? "true" : "false", (unsigned long long)handVisualDraws_,
+            joyConHands_[0].active, joyConHands_[1].active, joyConHands_[0].pose.flags, joyConHands_[1].pose.flags);
         std::fclose(file);
         std::rename(temp.c_str(), path.c_str());
     }
@@ -239,6 +259,8 @@ private:
     DroidDeckXrInputV2 handPacket_{};
     uint64_t gamepadKeys_ = 0, gamepadMotions_ = 0;
     DroidDeckXrSkeleton skeleton_{};
+    JoyConXrOrientation joyConOrientations_[2];
+    std::array<DroidDeckXrHand, 2> joyConHands_{};
     XrAtomicFile<DroidDeckXrSkeleton> skeletonFile_;
     double transferMs_ = 0, sourceAgeMs_ = 0;
     bool floorKnown_ = false, jointPermission_ = false;
@@ -569,12 +591,13 @@ private:
         initializeTracking();
         const std::string directory = std::string(app_->activity->internalDataPath) + "/.wayland-rt/";
         if (!inputAdapter_.open(directory + DROIDDECK_XR_INPUT_V2_FILE,
-                                               runtimeSession_.generation, runtimeSession_.originEpoch))
+                                runtimeSession_.generation, runtimeSession_.originEpoch, droiddeck_clock_domain_now_ns))
             throw std::runtime_error("XR hand input channel unavailable or already owned");
         if (!skeletonFile_.openWriter(directory + DROIDDECK_XR_SKELETON_FILE))
             throw std::runtime_error("XR skeleton channel unavailable or already owned");
-        if (!receiver_.Start(directory + DROIDDECK_XR_FRAME_SOCKET)) throw std::runtime_error("XR frame receiver unavailable");
-        bool gpu = !verifyPixels_ && gpuFrames_.Start(directory + DROIDDECK_XR_GPU_SOCKET, display_);
+        if (!receiver_.Start(directory + DROIDDECK_XR_FRAME_SOCKET, droiddeck_clock_domain_now_ns))
+            throw std::runtime_error("XR frame receiver unavailable");
+        bool gpu = !verifyPixels_ && gpuFrames_.Start(directory + DROIDDECK_XR_GPU_SOCKET, display_, droiddeck_clock_domain_now_ns);
         __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "GPU channel available=%d", gpu);
 
         health();
@@ -647,7 +670,7 @@ private:
     void releaseHands() noexcept {
         handActive_[0] = handActive_[1] = false;
         handPacket_ = droiddeck_xr_input_v2_neutral(runtimeSession_.generation, runtimeSession_.originEpoch);
-        handPacket_.sample_monotonic_ns = xr_monotonic_ns();
+        handPacket_.sample_monotonic_ns = droiddeck_clock_domain_now_ns();
         if (handMode_) handPacket_.flags |= DROIDDECK_XR_INPUT_HAND_MODE;
         if (handMode_ && showHandVisuals_ && handVisuals_.ready()) handPacket_.flags |= DROIDDECK_XR_INPUT_LOCAL_HAND_MESH;
         updateInputTelemetry();
@@ -659,13 +682,15 @@ private:
         skeleton_ = {};
         skeleton_.session_generation = runtimeSession_.generation;
         skeleton_.origin_epoch = runtimeSession_.originEpoch;
-        skeleton_.sample_monotonic_ns = xr_monotonic_ns();
+        skeleton_.sample_monotonic_ns = droiddeck_clock_domain_now_ns();
         skeletonFile_.write(skeleton_);
     }
 
     void sampleHands(XrTime predicted) {
         handPacket_ = droiddeck_xr_input_v2_neutral(runtimeSession_.generation, runtimeSession_.originEpoch);
-        handPacket_.sample_monotonic_ns = xr_monotonic_ns();
+        const auto sampled = xr_monotonic_ns();
+        handPacket_.sample_monotonic_ns = droiddeck_clock_domain_adjust_ns(sampled);
+        const auto clockShift = sampled - handPacket_.sample_monotonic_ns;
         skeleton_ = {};
         skeleton_.session_generation = runtimeSession_.generation;
         skeleton_.origin_epoch = runtimeSession_.originEpoch;
@@ -674,7 +699,7 @@ private:
         if (convertTime_) {
             timespec converted{};
             check(convertTime_(instance_, predicted, &converted), "hand predicted time conversion");
-            handPacket_.predicted_monotonic_ns = int64_t(converted.tv_sec) * 1000000000LL + converted.tv_nsec;
+            handPacket_.predicted_monotonic_ns = int64_t(converted.tv_sec) * 1000000000LL + converted.tv_nsec - clockShift;
             handPacket_.flags |= DROIDDECK_XR_INPUT_PREDICTED_TIME_CONVERTIBLE;
         }
         if (state_ == XR_SESSION_STATE_FOCUSED && !neutralFrames_) {
@@ -935,20 +960,27 @@ private:
 
     void publishTracking(const XrView views[2], bool validViews, XrTime predicted) {
         if (!tracking_) return;
-        timespec now{}; clock_gettime(CLOCK_MONOTONIC, &now);
+        const auto sampled = xr_monotonic_ns();
         DroidDeckXrTracking packet{};
         packet.magic = DROIDDECK_XR_MAGIC; packet.version = DROIDDECK_XR_VERSION;
         packet.active = validViews && (state_ == XR_SESSION_STATE_VISIBLE || state_ == XR_SESSION_STATE_FOCUSED)
             ? DROIDDECK_ANDROID_XR_ACTIVE : 0;
-        packet.sampled_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+        packet.sampled_ns = droiddeck_clock_domain_adjust_ns(sampled);
+        const auto clockShift = sampled - packet.sampled_ns;
         if (convertTime_) {
             timespec displayTime{};
             check(convertTime_(instance_, predicted, &displayTime), "display time conversion");
-            packet.predicted_ns = (int64_t)displayTime.tv_sec * 1000000000LL + displayTime.tv_nsec;
+            packet.predicted_ns = (int64_t)displayTime.tv_sec * 1000000000LL + displayTime.tv_nsec - clockShift;
         }
         packet.period_ns = period_;
         packet.head = posePacket(head_.pose, head_.locationFlags);
+        const auto joyCons = handMode_ && state_ == XR_SESSION_STATE_FOCUSED
+            ? callbacks_->joyConState() : JoyConSnapshot{};
         for (int eye = 0; eye < 2; eye++) {
+            joyConHands_[eye] = state_ == XR_SESSION_STATE_FOCUSED
+                ? joyConOrientations_[eye].update(joyCons.data() + eye*kJoyConSnapshotStride,
+                    packet.head, runtimeSession_.generation, runtimeSession_.originEpoch)
+                : DroidDeckXrHand{};
             if (validViews) {
                 packet.eyes[eye].pose = posePacket(views[eye].pose, viewFlags_);
                 packet.eyes[eye].fov[0] = views[eye].fov.angleLeft;
@@ -960,6 +992,7 @@ private:
             packet.hands[eye] = inputs_[eye];
             packet.hands[eye].pose = posePacket(handLocations_[eye].pose, handLocations_[eye].locationFlags);
             packet.hands[eye].active = handMode_ ? false : handActive_[eye];
+            if (handMode_) packet.hands[eye] = joyConHands_[eye];
         }
         uint32_t sequence = __atomic_load_n(&tracking_->seq, __ATOMIC_RELAXED);
         __atomic_store_n(&tracking_->seq, sequence | 1u, __ATOMIC_SEQ_CST);
@@ -1110,7 +1143,10 @@ private:
                 projection[column*4+row] = sourceHeader_.projection[side][row][column];
                 if (row < 3) camera[column*4+row] = inverse.m[row][column];
             }
-            handVisualDraws_ += handVisuals_.draw(eye.width, eye.height, skinMultiply(projection, camera), skeleton_);
+            auto visibleSkeleton = skeleton_;
+            for (int hand = 0; hand < 2; ++hand)
+                if (joyConHands_[hand].active) visibleSkeleton.active[hand] = 0;
+            handVisualDraws_ += handVisuals_.draw(eye.width, eye.height, skinMultiply(projection, camera), visibleSkeleton);
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         if (glGetError() != GL_NO_ERROR) throw std::runtime_error("OpenGL render error");
@@ -1245,8 +1281,9 @@ private:
         const auto transferBegin = xr_monotonic_ns();
         receiveFrame();
         transferMs_ = (xr_monotonic_ns() - transferBegin) / 1e6;
-        sourceAgeMs_ = sourceHeader_.frame_id ? (xr_frame_now() - sourceHeader_.captured_ns) / 1e6 : 0;
-        valid = valid && sourceHeader_.frame_id && xr_frame_now() - sourceHeader_.captured_ns < 500000000LL;
+        const auto sourceAge = droiddeck_clock_domain_now_ns() - sourceHeader_.captured_ns;
+        sourceAgeMs_ = sourceHeader_.frame_id ? sourceAge / 1e6 : 0;
+        valid = valid && sourceHeader_.frame_id && sourceAge >= 0 && sourceAge < 500000000LL;
         if (valid) for (int eye = 0; eye < 2; eye++) {
             auto source = xr_frame_view(sourceHeader_, eye);
             views[eye].pose.orientation = {source.orientation[0], source.orientation[1], source.orientation[2], source.orientation[3]};

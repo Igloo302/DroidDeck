@@ -6,7 +6,8 @@ namespace droiddeck::xr {
 
 class MappedGuestXrAdapter {
 public:
-    bool open(const std::string &path, uint64_t generation, uint64_t epoch) {
+    bool open(const std::string &path, uint64_t generation, uint64_t epoch, int64_t (*now)() = xr_monotonic_ns) {
+        now_ = now;
         generation_ = generation;
         epoch_ = epoch;
         open_ = generation && epoch && file_.openWriter(path);
@@ -27,11 +28,12 @@ public:
     void releaseInput(uint64_t generation) noexcept {
         if (!ready(generation)) return;
         auto neutral = droiddeck_xr_input_v2_neutral(generation, epoch_);
-        neutral.sample_monotonic_ns = xr_monotonic_ns();
+        neutral.sample_monotonic_ns = now_();
         file_.write(neutral);
     }
 private:
     XrAtomicFile<DroidDeckXrInputV2> file_;
+    int64_t (*now_)() = xr_monotonic_ns;
     uint64_t generation_ = 0, epoch_ = 0;
     bool open_ = false;
 };

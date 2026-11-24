@@ -16,14 +16,53 @@ struct DroidDeckXrSkeleton {
 static_assert(offsetof(DroidDeckXrSkeleton, joints) == 64 && sizeof(DroidDeckXrSkeleton) == 1728, "skeleton ABI");
 
 namespace droiddeck::xr {
-inline bool skeletonFresh(const DroidDeckXrSkeleton &skeleton, const DroidDeckXrInputV2 &input, int hand, int64_t now) {
+inline bool skeletonPacketFresh(const DroidDeckXrSkeleton &skeleton, const DroidDeckXrInputV2 &input, int hand, int64_t now) {
     if (hand < 0 || hand > 1 || skeleton.magic != 0x31535844 || skeleton.version != 1 ||
         skeleton.header_bytes != 64 || skeleton.byte_size != sizeof(skeleton) || !skeleton.active[hand] ||
         skeleton.session_generation != input.session_generation || skeleton.origin_epoch != input.origin_epoch ||
         !inputFresh(input, now) || !(input.flags & DROIDDECK_XR_INPUT_HAND_MODE) ||
         !(input.flags & DROIDDECK_XR_INPUT_FOCUSED) || skeleton.sample_monotonic_ns <= 0 ||
         now < skeleton.sample_monotonic_ns || now - skeleton.sample_monotonic_ns > 100000000LL) return false;
+    return true;
+}
+
+inline bool skeletonFresh(const DroidDeckXrSkeleton &skeleton, const DroidDeckXrInputV2 &input, int hand, int64_t now) {
+    if (!skeletonPacketFresh(skeleton, input, hand, now)) return false;
     for (const auto &joint : skeleton.joints[hand]) if (!poseValid(joint)) return false;
     return true;
+}
+
+inline DroidDeckXrPoseV2 joyConHandPose(const JoyConHandControls &controls, const DroidDeckXrInputV2 &input,
+        const DroidDeckXrSkeleton &skeleton, int hand, int64_t now) {
+    DroidDeckXrPoseV2 pose{};
+    if (!controls.active || hand < 0 || hand > 1 || !inputFresh(input, now)
+            || !(input.flags & DROIDDECK_XR_INPUT_FOCUSED) || !(input.flags & DROIDDECK_XR_INPUT_HAND_MODE)
+            || (controls.pose.flags & 5u) != 5u) return pose;
+    float length = 0;
+    for (float value : controls.pose.orientation) {
+        if (!std::isfinite(value)) return pose;
+        length += value * value;
+    }
+    if (std::abs(length - 1.f) > .01f) return pose;
+    const auto positionValid = [](const DroidDeckXrPoseV2 &candidate) {
+        if (!(candidate.flags & DROIDDECK_XR_POSITION_VALID)) return false;
+        for (float value : candidate.position) if (!std::isfinite(value)) return false;
+        return true;
+    };
+    const DroidDeckXrPoseV2 *position = nullptr;
+    const auto &sample = input.hands[hand];
+    if (sample.source == DROIDDECK_XR_SOURCE_RUNTIME_ACTION && (sample.status_bits & DROIDDECK_XR_GRIP_ACTIVE)
+            && positionValid(sample.grip)) position = &sample.grip;
+    if (!position && skeletonPacketFresh(skeleton, input, hand, now)) {
+        for (int joint : {0, 1}) if (positionValid(skeleton.joints[hand][joint])) {
+            position = &skeleton.joints[hand][joint];
+            break;
+        }
+    }
+    if (!position) return pose;
+    std::memcpy(pose.orientation, controls.pose.orientation, sizeof(pose.orientation));
+    std::memcpy(pose.position, position->position, sizeof(pose.position));
+    pose.flags = 5u | (position->flags & 10u);
+    return pose;
 }
 }

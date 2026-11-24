@@ -44,6 +44,7 @@ class AndroidXrActivity : NativeActivity() {
 
     fun onXrInputFocus(focused: Boolean) = gamepad.focus(focused)
     fun onXrGamepadMenu(): Int = gamepad.menuSequence
+    fun onXrJoyConState(): IntArray = gamepad.joyConState()
 
     fun onXrGamepadKey(device: Int, source: Int, action: Int, code: Int, scan: Int,
                        repeat: Int, meta: Int, flags: Int, downTime: Long, eventTime: Long): Boolean =
@@ -152,7 +153,7 @@ class AndroidXrActivity : NativeActivity() {
 
     override fun onDestroy() {
         closing = true
-        gamepad.pause()
+        gamepad.close()
         publishVisibility(false)
         super.onDestroy()
     }

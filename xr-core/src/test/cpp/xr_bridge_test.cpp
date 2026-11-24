@@ -10,7 +10,124 @@
 #include <sys/wait.h>
 using namespace droiddeck::xr;
 
+static void testHybridHandControls() {
+    const int64_t now = 1000000000;
+    auto packet = droiddeck_xr_input_v2_neutral(81, 1);
+    packet.sample_monotonic_ns = now;
+    packet.flags = DROIDDECK_XR_INPUT_FOCUSED | DROIDDECK_XR_INPUT_HAND_MODE;
+    for (auto &hand : packet.hands) {
+        hand.grip.flags = hand.aim.flags = 15;
+        hand.source = DROIDDECK_XR_SOURCE_RUNTIME_ACTION;
+        hand.ready_bits = hand.capability_bits = DROIDDECK_XR_PINCH | DROIDDECK_XR_GRASP;
+        hand.status_bits = 31;
+    }
+    DroidDeckXrTracking tracking{};
+    tracking.magic = DROIDDECK_XR_MAGIC; tracking.version = DROIDDECK_XR_VERSION;
+    tracking.active = DROIDDECK_ANDROID_XR_ACTIVE;
+    tracking.sampled_ns = now;
+    tracking.period_ns = 13888889;
+    tracking.eyes[0].width = tracking.eyes[0].height = 1024;
+    tracking.hands[0].active = DROIDDECK_XR_JOYCON_ACTIVE;
+    tracking.hands[0].trigger = 1;
+    tracking.hands[0].stick[0] = .5f;
+    tracking.hands[1].buttons = DROIDDECK_XR_MENU_CLICK | DROIDDECK_XR_PRIMARY_CLICK;
+    auto controls = [&](int hand) { return joyConHandControls(&tracking, packet, hand, now); };
+    assert(controls(0).active && controls(0).input.triggerClick && controls(0).input.stickX == .5f);
+    assert(!controls(1).active && !controls(1).input.primaryClick);
+    tracking.hands[1].active = DROIDDECK_XR_JOYCON_ACTIVE;
+    assert(controls(1).active && controls(1).input.primaryClick && controls(1).input.systemClick);
+    tracking.hands[0].active = 0;
+    assert(!controls(0).active && controls(1).active);
+    tracking.hands[0].active = 1;
+    assert(!controls(0).active);
+    tracking.hands[0].active = DROIDDECK_XR_JOYCON_ACTIVE;
+    assert(!joyConHandControls(nullptr, packet, 0, now).active);
+    assert(!controls(-1).active && !controls(2).active);
+    tracking.active = 1;
+    assert(!controls(0).active);
+    tracking.active = DROIDDECK_ANDROID_XR_ACTIVE;
+    packet.flags &= ~DROIDDECK_XR_INPUT_HAND_MODE;
+    assert(!controls(0).active);
+    packet.flags |= DROIDDECK_XR_INPUT_HAND_MODE;
+    packet.flags &= ~DROIDDECK_XR_INPUT_FOCUSED;
+    assert(!controls(0).active && !controls(0).input.triggerClick);
+    packet.flags |= DROIDDECK_XR_INPUT_FOCUSED;
+    packet.sample_monotonic_ns = now - 100000001;
+    assert(!controls(0).active);
+    packet.sample_monotonic_ns = now + 1;
+    assert(!controls(0).active);
+    packet.sample_monotonic_ns = now;
+    tracking.sampled_ns = now - 500000000;
+    assert(!controls(0).active);
+    tracking.sampled_ns = now + 1;
+    assert(!controls(0).active);
+    const int64_t rawNow = now + 10000000000LL;
+    tracking.sampled_ns = rawNow;
+    assert(!controls(0).active);
+    tracking.sampled_ns = rawNow - 10000000000LL;
+    assert(controls(0).active);
+    tracking.hands[0].stick[0] = std::numeric_limits<float>::quiet_NaN();
+    tracking.hands[0].stick[1] = 2;
+    assert(controls(0).input.stickX == 0 && controls(0).input.stickY == 1);
+
+    SteamVrHandBridge bridge;
+    auto &hand = packet.hands[0];
+    bridge.update(packet, 0, now);
+    bridge.update(packet, 0, now);
+    hand.pinch = hand.grasp = 1;
+    assert(bridge.update(packet, 0, now).triggerDown);
+    const auto owned = bridge.update(packet, 0, now, !controls(0).active);
+    assert(owned.active && !owned.triggerDown && !owned.graspDown && owned.trigger == 0 && owned.grasp == 0);
+    tracking.hands[1].active = 0;
+    SteamVrHandBridge otherHand;
+    otherHand.update(packet, 1, now, !controls(1).active);
+    otherHand.update(packet, 1, now, !controls(1).active);
+    packet.hands[1].pinch = 1;
+    assert(otherHand.update(packet, 1, now, !controls(1).active).triggerDown);
+    hand.grip.flags = 0;
+    assert(controls(0).active && controls(0).input.triggerClick);
+    assert(!bridge.update(packet, 0, now, !controls(0).active).active);
+    hand.grip.flags = 15;
+    hand.pinch = hand.grasp = 0;
+    assert(bridge.update(packet, 0, now, !controls(0).active).active);
+    tracking.hands[0].active = 0;
+    hand.pinch = hand.grasp = 1;
+    const auto disconnected = bridge.update(packet, 0, now, !controls(0).active);
+    assert(disconnected.active && !disconnected.triggerDown && !disconnected.graspDown);
+    hand.pinch = hand.grasp = 0;
+    bridge.update(packet, 0, now, !controls(0).active);
+    hand.pinch = hand.grasp = 1;
+    assert(bridge.update(packet, 0, now, !controls(0).active).triggerDown);
+
+    for (int side = 0; side < 2; ++side) {
+        HandDashboardChord chord;
+        tracking.hands[0].active = tracking.hands[1].active = 0;
+        for (auto &h : packet.hands) h.pinch = 0;
+        auto tick = [&](int64_t time) {
+            packet.sample_monotonic_ns = tracking.sampled_ns = time;
+            const auto left = joyConHandControls(&tracking, packet, 0, time);
+            const auto right = joyConHandControls(&tracking, packet, 1, time);
+            return chord.update(packet, time, uint32_t(left.active) | (uint32_t(right.active) << 1));
+        };
+        assert(!tick(now)); assert(!tick(now + 1));
+        tracking.hands[side].active = DROIDDECK_XR_JOYCON_ACTIVE;
+        for (auto &h : packet.hands) h.pinch = 1;
+        assert(!tick(now + 2)); assert(!tick(now + 1100000000));
+        assert(!chord.held());
+        packet.hands[side].pinch = 0;
+        assert(!tick(now + 1200000000));
+        tracking.hands[side].active = 0;
+        packet.hands[side].pinch = 1;
+        assert(!tick(now + 1300000000)); assert(!tick(now + 2400000000));
+        for (auto &h : packet.hands) h.pinch = 0;
+        assert(!tick(now + 2500000000));
+        for (auto &h : packet.hands) h.pinch = 1;
+        assert(!tick(now + 2600000000)); assert(tick(now + 3600000000));
+    }
+}
+
 int main() {
+    testHybridHandControls();
     auto packet = droiddeck_xr_input_v2_neutral(1, 2);
     int64_t now = 1000000000;
     packet.sample_monotonic_ns = now;

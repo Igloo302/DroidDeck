@@ -32,7 +32,7 @@
 #include "xr_skeleton_math.h"
 #include "index_pose.h"
 #include "pad_controller_config.h"
-#include "joycon_shm.h"
+#include "joycon_input.h"
 #include "presenter.h"
 #include "spatial_tracking.h"
 #include "luma_joycon.h"
@@ -917,7 +917,7 @@ private:
     void SendInputs(const droiddeck_joycon_hand &hand, double dt) {
         const uint32_t b = hand.buttons;
         const float x = std::clamp(hand.stick[0], -1.0f, 1.0f), y = std::clamp(hand.stick[1], -1.0f, 1.0f);
-        const bool stickTouched = (b & DROIDDECK_JOYCON_STICK) || x * x + y * y > kStickTouch * kStickTouch;
+        const bool stickTouched = JoyConStickTouched(b, x, y);
         const bool trigger = b & DROIDDECK_JOYCON_TRIGGER, grip = b & DROIDDECK_JOYCON_GRIP;
         const bool thumb = stickTouched || (b & (DROIDDECK_JOYCON_A | DROIDDECK_JOYCON_B | DROIDDECK_JOYCON_SYSTEM)) != 0;
         const bool system = b & DROIDDECK_JOYCON_SYSTEM, a = b & DROIDDECK_JOYCON_A, bButton = b & DROIDDECK_JOYCON_B;
@@ -941,7 +941,7 @@ private:
         SetScalar(padY_, 0.0f);
         SetScalar(padForce_, 0.0f);
         SetBool(padTouch_, false);
-        const double follow = 1.0 - std::exp(-dt / kCurlSeconds);
+        const double follow = JoyConCurlFollow(dt);
         curls_.thumb += ((thumb ? 1.0 : 0.0) - curls_.thumb) * follow;
         curls_.index += ((trigger ? 1.0 : 0.0) - curls_.index) * follow;
         const double rest = grip ? 1.0 : 0.0;
@@ -986,8 +986,7 @@ private:
         VRDriverInput()->UpdateScalarComponent(h, value, 0);
     }
 
-    static constexpr float kStickTouch = 0.1f, kGripTouch = 0.5f;
-    static constexpr double kCurlSeconds = 0.05;
+    static constexpr float kGripTouch = 0.5f;
     static constexpr std::chrono::milliseconds kSkeletonPeriod{11};
     static constexpr Vec3 kHeadPosition{0.0, 1.6, 0.0};
     static constexpr double kSettleSeconds = 0.6, kHoldingSettleSeconds = 1.5, kMaxOffset = 0.35;
@@ -1073,6 +1072,14 @@ public:
         in->CreateBooleanComponent(c, "/input/trigger/click", &triggerClick_);
         in->CreateScalarComponent(c, "/input/trigger/value", &trigger_, VRScalarType_Absolute, VRScalarUnits_NormalizedOneSided);
         if (androidXrHands_) {
+            in->CreateBooleanComponent(c, "/input/system/touch", &systemTouch_);
+            in->CreateScalarComponent(c, "/input/trackpad/x", &trackpadX_, VRScalarType_Absolute, VRScalarUnits_NormalizedTwoSided);
+            in->CreateScalarComponent(c, "/input/trackpad/y", &trackpadY_, VRScalarType_Absolute, VRScalarUnits_NormalizedTwoSided);
+            in->CreateScalarComponent(c, "/input/trackpad/force", &trackpadForce_, VRScalarType_Absolute, VRScalarUnits_NormalizedOneSided);
+            in->CreateBooleanComponent(c, "/input/trackpad/touch", &trackpadTouch_);
+            const char *fingers[]{"/input/finger/index", "/input/finger/middle", "/input/finger/ring", "/input/finger/pinky"};
+            for (int finger = 0; finger < 4; ++finger)
+                in->CreateScalarComponent(c, fingers[finger], &fingers_[finger], VRScalarType_Absolute, VRScalarUnits_NormalizedOneSided);
             in->CreatePoseComponent(c, "/pose/raw", &rawPose_);
             in->CreatePoseComponent(c, "/pose/grip", &gripPose_);
             in->CreatePoseComponent(c, "/pose/tip", &aimPose_);
@@ -1118,19 +1125,22 @@ public:
         opticalInputs_.Reset();
         opticalPose_.Reset();
         if (androidXr_) xrHandBridge_.reset();
+        joyConInputsAt_ = 0;
+        joyConIndexCurl_ = joyConGripCurl_ = 0;
         steadyHandAim_ = false;
         opticalActive_ = false;
         lastOpticalState_ = ~0u;
         if (id_ == k_unTrackedDeviceIndexInvalid) return;
         auto in = VRDriverInput();
         EVRInputError error = VRInputError_None;
-        for (VRInputComponentHandle_t h : {system_, menu_, grip_, triggerClick_, padClick_, padTouch_, triggerTouch_,
+        for (VRInputComponentHandle_t h : {system_, systemTouch_, menu_, grip_, triggerClick_, padClick_, padTouch_, trackpadTouch_, triggerTouch_,
                                            primaryClick_, secondaryClick_, primaryTouch_, secondaryTouch_}) {
             if (!h) continue;
             const auto result = in->UpdateBooleanComponent(h, false, 0);
             if (result != VRInputError_None) error = result;
         }
-        for (VRInputComponentHandle_t h : {trigger_, padX_, padY_, gripValue_, gripForce_}) {
+        for (VRInputComponentHandle_t h : {trigger_, padX_, padY_, gripValue_, gripForce_, trackpadX_, trackpadY_, trackpadForce_,
+                fingers_[0], fingers_[1], fingers_[2], fingers_[3]}) {
             if (!h) continue;
             const auto result = in->UpdateScalarComponent(h, 0.0f, 0);
             if (result != VRInputError_None) error = result;
@@ -1140,19 +1150,26 @@ public:
             Log("%s controller inputs cleared: error=%d", right_ ? "right" : "left", int(error));
     }
 
-    void UpdateXr(const DroidDeckXrHand &hand, int64_t predicted, const XrTouchInput *bridge = nullptr) {
+    void UpdateXr(const DroidDeckXrHand &hand, int64_t predicted, const XrTouchInput *bridge = nullptr, bool inferredPosition = false) {
         if (id_ == k_unTrackedDeviceIndexInvalid) return;
         DriverPose_t pose{};
         pose.qWorldFromDriverRotation.w = pose.qDriverFromHeadRotation.w = 1;
         pose.qRotation.w = 1;
         pose.deviceIsConnected = hand.active;
         pose.poseIsValid = hand.active && XrTrackingFile::Tracked(hand.pose);
+        if (hand.active && inferredPosition) {
+            DroidDeckXrPoseV2 candidate{};
+            std::memcpy(candidate.position, hand.pose.position, sizeof(candidate.position));
+            std::memcpy(candidate.orientation, hand.pose.orientation, sizeof(candidate.orientation));
+            candidate.flags = hand.pose.flags;
+            pose.poseIsValid = droiddeck::xr::poseValid(candidate);
+        }
         if (pose.poseIsValid) {
             pose.qRotation = {hand.pose.orientation[3], hand.pose.orientation[0], hand.pose.orientation[1], hand.pose.orientation[2]};
             for (int axis = 0; axis < 3; axis++) pose.vecPosition[axis] = hand.pose.position[axis];
             pose.poseTimeOffset = XrTrackingFile::PoseTimeOffset(predicted, XrTrackingFile::Now());
         }
-        pose.result = pose.poseIsValid ? TrackingResult_Running_OK : TrackingResult_Running_OutOfRange;
+        pose.result = pose.poseIsValid && XrTrackingFile::Tracked(hand.pose) ? TrackingResult_Running_OK : TrackingResult_Running_OutOfRange;
         pose_ = pose;
         if (!bridge) VRServerDriverHost()->TrackedDevicePoseUpdated(id_, pose, sizeof(pose));
         XrTouchInput input = bridge ? *bridge : xr_touch_input(hand, right_);
@@ -1166,8 +1183,10 @@ public:
         driverInput->UpdateBooleanComponent(padTouch_, input.stickTouch, 0);
         if (!bridge || menu_) driverInput->UpdateBooleanComponent(menu_, false, 0);
         driverInput->UpdateBooleanComponent(system_, input.systemClick, 0);
+        if (systemTouch_) driverInput->UpdateBooleanComponent(systemTouch_, input.systemClick, 0);
         if (xrMode_) {
             driverInput->UpdateScalarComponent(gripValue_, input.grip, 0);
+            if (gripForce_) driverInput->UpdateScalarComponent(gripForce_, input.grip, 0);
             driverInput->UpdateBooleanComponent(triggerTouch_, input.triggerTouch, 0);
             driverInput->UpdateBooleanComponent(primaryClick_, input.primaryClick, 0);
             driverInput->UpdateBooleanComponent(secondaryClick_, input.secondaryClick, 0);
@@ -1178,22 +1197,54 @@ public:
         if (bridge) VRServerDriverHost()->TrackedDevicePoseUpdated(id_, pose, sizeof(pose));
     }
 
-    void UpdateXrHand(const DroidDeckXrInputV2 &packet, const DroidDeckXrSkeleton &skeleton, int64_t now, bool dashboard, bool suppress = false) {
+    void UpdateXrHand(const DroidDeckXrInputV2 &packet, const DroidDeckXrSkeleton &skeleton, int64_t now,
+            bool dashboard, bool suppress = false, const droiddeck::xr::JoyConHandControls &controls = {}) {
         using namespace droiddeck::xr;
         const int hand = right_ ? 1 : 0;
         if (androidXrHands_ && id_ != k_unTrackedDeviceIndexInvalid && inputFresh(packet, now)) {
             const bool local = packet.flags & DROIDDECK_XR_INPUT_LOCAL_HAND_MESH;
-            if (local != localHandMesh_) {
+            if (local != localHandMesh_ || controls.active != joyConModel_) {
                 localHandMesh_ = local;
+                joyConModel_ = controls.active;
                 VRProperties()->SetStringProperty(VRProperties()->TrackedDeviceToPropertyContainer(id_), Prop_RenderModelName_String,
+                    joyConModel_ ? (right_ ? "{indexcontroller}valve_controller_knu_1_0_right" : "{indexcontroller}valve_controller_knu_1_0_left") :
                     local ? (right_ ? "{droiddeck}droiddeck_hand_right_xr" : "{droiddeck}droiddeck_hand_left_xr") :
                             (right_ ? "{droiddeck}droiddeck_hand_right" : "{droiddeck}droiddeck_hand_left"));
             }
         }
-        const auto output = xrHandBridge_.update(packet, hand, now);
+        const auto output = xrHandBridge_.update(packet, hand, now, !controls.active);
         DroidDeckXrHand state{};
         XrTouchInput input;
-        if (output.active) {
+        if (controls.active) {
+            const auto aim = joyConHandPose(controls, packet, skeleton, hand, now);
+            if (poseValid(aim)) {
+                Quat rawRotation;
+                Vec3 rawPosition;
+                IndexRawPose(right_, {aim.orientation[3], aim.orientation[0], aim.orientation[1], aim.orientation[2]},
+                    {aim.position[0], aim.position[1], aim.position[2]}, &rawRotation, &rawPosition);
+                const DroidDeckXrPoseV2 raw{{float(rawPosition.x), float(rawPosition.y), float(rawPosition.z)},
+                    {float(rawRotation.x), float(rawRotation.y), float(rawRotation.z), float(rawRotation.w)}, aim.flags};
+                std::memcpy(state.pose.position, raw.position, sizeof(raw.position));
+                std::memcpy(state.pose.orientation, raw.orientation, sizeof(raw.orientation));
+                state.pose.flags = raw.flags;
+                HmdMatrix34_t identity{};
+                for (int row = 0; row < 3; ++row) identity.m[row][row] = 1;
+                if (rawPose_) VRDriverInput()->UpdatePoseComponent(rawPose_, &identity, 0);
+                const auto inverse = handInverse(handTransform(raw));
+                if (aimPose_) {
+                    const auto offset = handCompose(inverse, handTransform(aim));
+                    HmdMatrix34_t matrix; std::memcpy(matrix.m, offset.m, sizeof(offset.m));
+                    VRDriverInput()->UpdatePoseComponent(aimPose_, &matrix, 0);
+                }
+                if (gripPose_) {
+                    auto grip = raw;
+                    std::memcpy(grip.position, aim.position, sizeof(grip.position));
+                    const auto offset = handCompose(inverse, handTransform(grip));
+                    HmdMatrix34_t matrix; std::memcpy(matrix.m, offset.m, sizeof(offset.m));
+                    VRDriverInput()->UpdatePoseComponent(gripPose_, &matrix, 0);
+                }
+            }
+        } else if (output.active) {
             const auto &sample = packet.hands[hand];
             const bool aimValid = poseValid(sample.aim) && (sample.status_bits & DROIDDECK_XR_AIM_ACTIVE);
             auto raw = sample.grip;
@@ -1232,11 +1283,32 @@ public:
             }
         }
         const bool focused = inputFresh(packet, now) && (packet.flags & DROIDDECK_XR_INPUT_FOCUSED);
+        if (controls.active) {
+            input = controls.input;
+            if (suppress) { input.trigger = input.grip = 0; input.triggerClick = input.gripClick = false; }
+        }
         // Menu input must survive holding a gamepad outside hand-tracking coverage.
         if (focused) state.active = true;
-        input.systemClick = focused && !right_ && dashboard;
+        input.systemClick = input.systemClick || (focused && !right_ && dashboard);
+        if (androidXrHands_ && id_ != k_unTrackedDeviceIndexInvalid) {
+            if (controls.active) {
+                const double dt = joyConInputsAt_ > 0 ? std::clamp(double(now - joyConInputsAt_) * 1e-9, 0., .1) : 0;
+                const double follow = JoyConCurlFollow(dt);
+                joyConIndexCurl_ += ((input.triggerClick ? 1. : 0.) - joyConIndexCurl_) * follow;
+                joyConGripCurl_ += ((input.gripClick ? 1. : 0.) - joyConGripCurl_) * follow;
+                joyConInputsAt_ = now;
+            } else {
+                joyConInputsAt_ = 0;
+                joyConIndexCurl_ = joyConGripCurl_ = 0;
+            }
+            auto in = VRDriverInput();
+            in->UpdateScalarComponent(fingers_[0], float(joyConIndexCurl_), 0);
+            for (int finger = 1; finger < 4; ++finger) in->UpdateScalarComponent(fingers_[finger], float(joyConGripCurl_), 0);
+            for (auto field : {trackpadX_, trackpadY_, trackpadForce_}) in->UpdateScalarComponent(field, 0, 0);
+            in->UpdateBooleanComponent(trackpadTouch_, false, 0);
+        }
         const int64_t predicted = packet.flags & DROIDDECK_XR_INPUT_PREDICTED_TIME_CONVERTIBLE ? packet.predicted_monotonic_ns : 0;
-        UpdateXr(state, predicted, &input);
+        UpdateXr(state, predicted, &input, controls.active);
     }
 
     VRInputComponentHandle_t Haptic() const { return id_ == k_unTrackedDeviceIndexInvalid ? 0 : haptic_; }
@@ -1417,6 +1489,10 @@ private:
     bool androidXr_ = false;
     bool androidXrHands_ = false;
     bool localHandMesh_ = true;
+    bool joyConModel_ = false;
+    int64_t joyConInputsAt_ = 0;
+    double joyConIndexCurl_ = 0, joyConGripCurl_ = 0;
+    VRInputComponentHandle_t systemTouch_ = 0, trackpadX_ = 0, trackpadY_ = 0, trackpadForce_ = 0, trackpadTouch_ = 0, fingers_[4]{};
     EVRInputError lastSkeletonError_ = VRInputError_InvalidHandle;
     OpticalInputs opticalInputs_;
     OpticalPose opticalPose_;
@@ -1680,7 +1756,7 @@ private:
         bool haveJoyCons = false;
         auto lastSent = std::chrono::steady_clock::now();
         while (running_) {
-            DroidDeckXrTracking xr;
+            DroidDeckXrTracking xr{};
             if (xrMode_) {
                 bool fresh = xr_.Read(&xr) && XrTrackingFile::Fresh(xr);
                 if (fresh) PublishChaperone(xr);
@@ -1694,7 +1770,11 @@ private:
                         xrHandMode_ = (input.flags & DROIDDECK_XR_INPUT_HAND_MODE) != 0;
                     DroidDeckXrSkeleton skeleton{};
                     if (!xrSkeleton_.read("/run/droiddeck/" DROIDDECK_XR_SKELETON_FILE, skeleton)) skeleton = {};
-                    const bool handMenu = xrDashboard_.update(input, now);
+                    droiddeck::xr::JoyConHandControls controls[2];
+                    for (int hand = 0; hand < 2; ++hand)
+                        controls[hand] = droiddeck::xr::joyConHandControls(fresh ? &xr : nullptr, input, hand, now);
+                    const uint32_t joyConHands = uint32_t(controls[0].active) | (uint32_t(controls[1].active) << 1);
+                    const bool handMenu = xrDashboard_.update(input, now, joyConHands);
                     const bool gamepadMenu = xrGamepadMenu_.update(input, now);
                     if (handMenu || gamepadMenu) {
                         xrDashboardAt_ = now;
@@ -1704,7 +1784,7 @@ private:
                     const auto menu = droiddeck::xr::handMenuButtons(xrDashboardAt_, now, xrDashboard_.held());
                     for (int hand = 0; hand < 2; hand++) if (CardboardController *pad = ActiveHand(hand)) {
                         if (pad->AndroidXrHands() != xrHandMode_) { pad->Disconnect(); continue; }
-                        if (xrHandMode_) pad->UpdateXrHand(input, skeleton, now, menu.system, menu.suppress);
+                        if (xrHandMode_) pad->UpdateXrHand(input, skeleton, now, menu.system, menu.suppress, controls[hand]);
                         else {
                             DroidDeckXrHand state = fresh ? xr.hands[hand] : DroidDeckXrHand{};
                             auto buttons = xr_touch_input(state, hand == 1);

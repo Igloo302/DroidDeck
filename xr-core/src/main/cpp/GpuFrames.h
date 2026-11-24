@@ -8,8 +8,9 @@
 
 class XrGpuFrames {
 public:
-    bool Start(const std::string &filename, EGLDisplay display) {
+    bool Start(const std::string &filename, EGLDisplay display, int64_t (*now)() = xr_frame_now) {
         display_ = display;
+        now_ = now;
         const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
         const char *eglExtensions = eglQueryString(display, EGL_EXTENSIONS);
         if (!extensions || !eglExtensions || !strstr(extensions, "GL_EXT_external_buffer")
@@ -49,7 +50,13 @@ public:
         return true;
     }
 
-    bool Take(DroidDeckXrFrameHeader &header, GLuint &texture) {
+    void Discard() {
+        DroidDeckXrFrameHeader header{};
+        GLuint texture{};
+        Take(header, texture, true);
+    }
+
+    bool Take(DroidDeckXrFrameHeader &header, GLuint &texture, bool discard = false) {
         if (listener_ < 0) return false;
         if (peer_ < 0) {
             peer_ = accept4(listener_, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK);
@@ -77,12 +84,12 @@ public:
         }
         XrGpuFrame frame;
         if (!xr_gpu_receive(peer_, &frame, sizeof(frame))) { Disconnect(); return false; }
-        auto state = xr_gpu_frame_state(frame, width_, height_, lastFrame_, xr_frame_now());
+        auto state = xr_gpu_frame_state(frame, width_, height_, lastFrame_, now_());
         if (state == XrGpuFrameState::Invalid) {
             rejected_++; Disconnect(); return false;
         }
         lastFrame_ = frame.header.frame_id;
-        if (state == XrGpuFrameState::Stale) {
+        if (discard || state == XrGpuFrameState::Stale) {
             // No GPU read was submitted, so the producer can safely reclaim a dropped frame.
             dropped_++;
             if (!xr_gpu_send(peer_, &frame.header.frame_id, sizeof(frame.header.frame_id))) Disconnect();
@@ -134,6 +141,7 @@ public:
     }
 private:
     EGLDisplay display_ = EGL_NO_DISPLAY;
+    int64_t (*now_)() = xr_frame_now;
     XrGpuCompletion completion_;
     PFNEGLCREATESYNCKHRPROC createSync_{};
     PFNEGLDESTROYSYNCKHRPROC destroySync_{};

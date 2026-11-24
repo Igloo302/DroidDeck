@@ -106,8 +106,9 @@ struct DroidDeckXrPixels {
 class XrFrameReceiver {
 public:
     ~XrFrameReceiver() { Stop(); }
-    bool Start(const std::string &filename) {
+    bool Start(const std::string &filename, int64_t (*now)() = xr_frame_now) {
         if (listener_ >= 0 || filename.empty() || filename.size() >= sizeof(sockaddr_un::sun_path)) return false;
+        now_ = now;
         lock_ = open((filename + ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
         struct stat status{};
         if (lock_ < 0) return false;
@@ -162,6 +163,7 @@ private:
     std::string filename_;
     std::atomic<bool> stopping_{false};
     std::atomic<uint64_t> rejected_{0}, received_{0};
+    int64_t (*now_)() = xr_frame_now;
     std::thread thread_;
     std::mutex mutex_;
     DroidDeckXrPixels pending_;
@@ -185,9 +187,7 @@ private:
                 XrFrameDescriptor shared;
                 int64_t deadline = xr_frame_now() + 200000000LL;
                 if (!xr_frame_header(client, frame.header, shared, deadline)) break;
-                int64_t now = xr_frame_now();
-                if (!xr_frame_valid(frame.header) || frame.header.captured_ns > now
-                    || now - frame.header.captured_ns > 500000000LL || frame.header.frame_id <= lastFrame
+                if (!xr_frame_valid(frame.header) || frame.header.frame_id <= lastFrame
                     || (frame.header.version == DROIDDECK_XR_FRAME_SHARED_VERSION) != (shared.fd >= 0)) { rejected_++; break; }
                 try {
                     {
@@ -203,15 +203,18 @@ private:
                 bool copied = shared.fd >= 0 ? xr_frame_shared_pixels(shared.fd, frame.pixels.data(), frame.pixels.size())
                     : xr_frame_io(client, frame.pixels.data(), frame.pixels.size(), false, deadline);
                 if (!copied) { rejected_++; break; }
-                if (xr_frame_now() - frame.header.captured_ns > 500000000LL) { rejected_++; break; }
+                const int64_t age = now_() - frame.header.captured_ns;
                 uint64_t acknowledgement = frame.header.frame_id;
                 lastFrame = acknowledgement;
-                {
+                if (age >= 0 && age <= 500000000LL) {
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (!pending_.pixels.empty() && recycled_.size() < 3) recycled_.push_back(std::move(pending_.pixels));
                     pending_ = std::move(frame);
+                    received_++;
+                } else {
+                    rejected_++;
+                    Recycle(std::move(frame.pixels));
                 }
-                received_++;
                 if (!xr_frame_io(client, &acknowledgement, sizeof(acknowledgement), true, deadline)) break;
             }
             close(client);

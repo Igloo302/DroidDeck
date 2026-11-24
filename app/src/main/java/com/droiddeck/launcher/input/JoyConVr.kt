@@ -18,8 +18,6 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import androidx.annotation.RequiresApi
 import java.io.File
-import kotlin.math.min
-import kotlin.math.sqrt
 
 @RequiresApi(31)
 class JoyConVr(
@@ -69,7 +67,8 @@ class JoyConVr(
         }
         val id = event.deviceId
         val scanCode = event.scanCode
-        worker.post { hand(id)?.key(scanCode, down) }
+        val canceled = event.isCanceled
+        worker.post { hand(id)?.key(scanCode, down, canceled) }
         return true
     }
 
@@ -184,27 +183,16 @@ class JoyConVr(
         private val accel = FloatArray(3)
         private var accelStamp = 0L
         private var haveAccel = false
-        private val pressed = HashSet<Int>()
+        private val buttons = JoyConButtons(side)
         private var stickX = 0f
         private var stickY = 0f
-        private var systemDown = false
-        private var systemTap = false
-        private var held = false
         private var recenter = 0
         private var battery = -1f
         private var charging = false
         private var batteryAt = 0L
         private var sampleAt = 0L
         private var live = true
-        private val hold = Runnable {
-            if (!systemDown || held) return@Runnable
-            held = true
-            recenter()
-        }
-        private val tapEnd = Runnable {
-            systemTap = false
-            publish()
-        }
+        private val buttonUpdate = Runnable { if (live) publish() }
         private val flush = Runnable { flushReport() }
 
         override fun onSensorChanged(event: SensorEvent) {
@@ -244,89 +232,57 @@ class JoyConVr(
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
-        fun key(scanCode: Int, down: Boolean) {
+        fun key(scanCode: Int, down: Boolean, canceled: Boolean) {
             if (!live) return
-            val bit = JoyCon.vrButton(side, scanCode)
-            if (bit == 0) return
-            if (bit == JoyCon.VR_SYSTEM) {
-                system(down)
-                return
-            }
-            if (down) pressed += scanCode else pressed -= scanCode
+            if (JoyCon.vrButton(side, scanCode) == 0) return
+            if (canceled) buttons.cancel(scanCode)
+            else buttons.key(scanCode, down, System.nanoTime(), ::bumpRecenter)
             publish()
         }
 
         fun stick(x: Float, y: Float) {
             if (!live) return
-            val length = sqrt(x * x + y * y)
-            if (length < STICK_DEADZONE) {
-                stickX = 0f
-                stickY = 0f
-            } else {
-                val scale = min((length - STICK_DEADZONE) / (1f - STICK_DEADZONE), 1f) / length
-                stickX = x * scale
-                stickY = y * scale
-            }
+            val normalized = JoyConControls.stick(x, y)
+            stickX = normalized.x
+            stickY = normalized.y
             publish()
         }
 
         fun release() {
             if (!live) return
-            pressed.clear()
+            buttons.clear()
             stickX = 0f
             stickY = 0f
-            systemDown = false
-            systemTap = false
-            held = false
-            worker.removeCallbacks(hold)
-            worker.removeCallbacks(tapEnd)
+            worker.removeCallbacks(buttonUpdate)
             publish()
         }
 
         fun recenter() {
             if (!live) return
-            recenter++
-            confirm()
+            bumpRecenter()
             publish()
         }
+
+        private fun bumpRecenter() { recenter++; confirm() }
 
         fun stop() {
             live = false
             runCatching { sensors.unregisterListener(this) }
-            worker.removeCallbacks(hold)
-            worker.removeCallbacks(tapEnd)
+            worker.removeCallbacks(buttonUpdate)
             worker.removeCallbacks(flush)
             out.write(side, JoyConShm.Hand(connected = false))
             Log.i(TAG, "${SIDES[side]} Joy-Con \"${device.name}\" (id ${device.id}) is a game pad again")
         }
 
-        private fun system(down: Boolean) {
-            if (down == systemDown) return
-            systemDown = down
-            if (down) {
-                held = false
-                worker.postDelayed(hold, HOLD_MS)
-                return
-            }
-            worker.removeCallbacks(hold)
-            if (held) return
-            systemTap = true
-            publish()
-            worker.removeCallbacks(tapEnd)
-            worker.postDelayed(tapEnd, TAP_MS)
-        }
-
-        private fun buttons(): Int {
-            var bits = if (systemTap) JoyCon.VR_SYSTEM else 0
-            for (scanCode in pressed) bits = bits or JoyCon.vrButton(side, scanCode)
-            return bits
-        }
-
         private fun publish() {
+            val now = System.nanoTime()
+            val bits = buttons.buttons(now, ::bumpRecenter)
+            worker.removeCallbacks(buttonUpdate)
+            buttons.nextUpdateMs(now)?.let { worker.postDelayed(buttonUpdate, it) }
             out.write(side, JoyConShm.Hand(
                 connected = filter.ready,
                 charging = charging,
-                buttons = buttons(),
+                buttons = bits,
                 rotation = filter.rotation,
                 rate = filter.rate,
                 displacement = motion.displacement,
@@ -362,11 +318,8 @@ class JoyConVr(
         private val SIDES = arrayOf("left", "right")
         private const val MAX_RETRIES = 6
         private const val RETRY_MS = 500L
-        private const val HOLD_MS = 800L
-        private const val TAP_MS = 120L
         private const val CONFIRM_MS = 80L
         private const val BATTERY_NS = 30_000_000_000L
-        private const val STICK_DEADZONE = 0.12f
         private const val FLUSH_MS = 3L
     }
 }
