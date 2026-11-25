@@ -11,6 +11,24 @@ import android.view.MotionEvent
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToInt
 
+internal object XrJoyConSnapshot {
+    const val STRIDE = 13
+    const val SIZE = 2 * STRIDE
+    const val BUTTONS = 0
+    const val STICK_X = 1
+    const val STICK_Y = 2
+    const val QUATERNION_X = 3
+    const val QUATERNION_Y = 4
+    const val QUATERNION_Z = 5
+    const val QUATERNION_W = 6
+    const val FRESH = 7
+    const val EPOCH = 8
+    const val TIME_LOW = 9
+    const val TIME_HIGH = 10
+    const val ANGULAR_SPEED = 11
+    const val RECENTER_SEQUENCE = 12
+}
+
 internal class XrGamepadMenu {
     data class Result(val consume: Boolean = false, val request: Boolean = false)
     private data class Keys(var down: Int = 0, var latched: Boolean = false)
@@ -102,23 +120,27 @@ internal class XrGamepadInput(
     }
 
     @Synchronized fun joyConState(): IntArray {
-        val state = IntArray(18)
+        val state = IntArray(XrJoyConSnapshot.SIZE)
         if (!resumed || !focused) return state
         val now = nowNs()
         for (side in joyCons.indices) {
             val hand = joyCons[side] ?: continue
-            val base = side * 9
-            state[base] = JOYCON_CONNECTED or hand.buttons.buttons(now) { orientation.recenter(side) }
-            state[base + 1] = hand.stickX
-            state[base + 2] = hand.stickY
+            val base = side * XrJoyConSnapshot.STRIDE
+            state[base + XrJoyConSnapshot.BUTTONS] = JOYCON_CONNECTED or hand.buttons.buttons(now) { orientation.recenter(side) }
+            state[base + XrJoyConSnapshot.STICK_X] = hand.stickX
+            state[base + XrJoyConSnapshot.STICK_Y] = hand.stickY
             val sample = orientation.snapshot(side)
-            state[base + 8] = sample.epoch
+            state[base + XrJoyConSnapshot.EPOCH] = sample.epoch
+            state[base + XrJoyConSnapshot.TIME_LOW] = sample.timeNs.toInt()
+            state[base + XrJoyConSnapshot.TIME_HIGH] = (sample.timeNs ushr 32).toInt()
+            state[base + XrJoyConSnapshot.ANGULAR_SPEED] = sample.angularSpeed.toRawBits()
+            state[base + XrJoyConSnapshot.RECENTER_SEQUENCE] = sample.recenterSequence
             if (sample.fresh(nowNs())) {
-                state[base + 3] = sample.rotation.x.toRawBits()
-                state[base + 4] = sample.rotation.y.toRawBits()
-                state[base + 5] = sample.rotation.z.toRawBits()
-                state[base + 6] = sample.rotation.w.toRawBits()
-                state[base + 7] = 1
+                state[base + XrJoyConSnapshot.QUATERNION_X] = sample.rotation.x.toRawBits()
+                state[base + XrJoyConSnapshot.QUATERNION_Y] = sample.rotation.y.toRawBits()
+                state[base + XrJoyConSnapshot.QUATERNION_Z] = sample.rotation.z.toRawBits()
+                state[base + XrJoyConSnapshot.QUATERNION_W] = sample.rotation.w.toRawBits()
+                state[base + XrJoyConSnapshot.FRESH] = 1
             }
         }
         return state
@@ -185,7 +207,7 @@ internal class XrGamepadInput(
     @Synchronized override fun onInputDeviceChanged(deviceId: Int) {
         if (!resumed) return
         menu.remove(deviceId)
-        removeJoyCon(deviceId)
+        joyCons.filterNotNull().filter { it.deviceId == deviceId }.forEach { it.release() }
         bridge()?.onDeviceRemoved(deviceId)
         syncControllers()
     }

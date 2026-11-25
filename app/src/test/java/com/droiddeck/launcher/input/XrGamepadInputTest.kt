@@ -298,13 +298,22 @@ class XrGamepadInputTest {
         val left = joyCon(101, JoyCon.LEFT)
         joyCon(102, JoyCon.RIGHT)
         input.onInputDeviceAdded(left.id)
+        now = 0x1234_5678_fedc_ba98L
         val q = Quaternion(.5f, -.5f, .5f, -.5f)
-        orientation.samples[0] = XrJoyConOrientation(q, now, 12)
-        orientation.samples[1] = XrJoyConOrientation(Quaternion.IDENTITY, now, 21)
+        orientation.samples[0] = XrJoyConOrientation(q, now, 12, 2.5f, 3)
+        orientation.samples[1] = XrJoyConOrientation(Quaternion.IDENTITY, now - 7, 21, .125f, 9)
         val state = input.joyConState()
-        assertEquals(18, state.size)
+        assertEquals(26, state.size)
         assertArrayEquals(intArrayOf(CONNECTED, 0, 0, q.x.toRawBits(), q.y.toRawBits(), q.z.toRawBits(),
-            q.w.toRawBits(), 1, 12, CONNECTED, 0, 0, 0, 0, 0, 1f.toRawBits(), 1, 21), state)
+            q.w.toRawBits(), 1, 12, 0xfedcba98.toInt(), 0x12345678, 2.5f.toRawBits(), 3,
+            CONNECTED, 0, 0, 0, 0, 0, 1f.toRawBits(), 1, 21,
+            0xfedcba91.toInt(), 0x12345678, .125f.toRawBits(), 9), state)
+        for (side in 0..1) {
+            val base = side * XrJoyConSnapshot.STRIDE
+            val timestamp = (state[base + XrJoyConSnapshot.TIME_HIGH].toLong() shl 32) or
+                (state[base + XrJoyConSnapshot.TIME_LOW].toLong() and 0xffff_ffffL)
+            assertEquals(now - side * 7, timestamp)
+        }
         state[6] = 0
         assertEquals(q.w.toRawBits(), input.joyConState()[6])
     }
@@ -319,16 +328,16 @@ class XrGamepadInputTest {
         }
         val state = input.joyConState()
         assertEquals(1, state[7])
-        assertEquals(1, state[16])
+        assertEquals(1, state[RIGHT_FRESH])
         assertEquals(3, state[8])
-        assertEquals(4, state[17])
+        assertEquals(4, state[RIGHT_EPOCH])
     }
 
     @Test fun staleAndFutureOrientationCannotDisableConnectedControls() {
         val left = joyCon(101, JoyCon.LEFT)
         input.onInputDeviceAdded(left.id)
         joyKey(left, 0x138)
-        orientation.samples[0] = XrJoyConOrientation(Quaternion.IDENTITY, now, 7)
+        orientation.samples[0] = XrJoyConOrientation(Quaternion.IDENTITY, now, 7, .75f, 2)
         now += XrJoyConOrientation.MAX_AGE_NS
         assertEquals(1, input.joyConState()[7])
         now++
@@ -336,6 +345,9 @@ class XrGamepadInputTest {
         assertEquals(CONNECTED or JoyCon.VR_TRIGGER, stale[0])
         assertArrayEquals(IntArray(5), stale.copyOfRange(3, 8))
         assertEquals(7, stale[8])
+        assertEquals(1_000_000_000, stale[XrJoyConSnapshot.TIME_LOW])
+        assertEquals(.75f.toRawBits(), stale[XrJoyConSnapshot.ANGULAR_SPEED])
+        assertEquals(2, stale[XrJoyConSnapshot.RECENTER_SEQUENCE])
         orientation.samples[0] = XrJoyConOrientation(Quaternion.IDENTITY, now + 1, 8)
         assertEquals(0, input.joyConState()[7])
         assertEquals(CONNECTED or JoyCon.VR_TRIGGER, input.joyConState()[0])
@@ -344,90 +356,126 @@ class XrGamepadInputTest {
     @Test fun systemTapPulsesOnReleaseAndHoldRecentersOnceWithoutDashboardPulse() {
         val right = joyCon(102, JoyCon.RIGHT)
         input.onInputDeviceAdded(right.id)
-        val firstEpoch = input.joyConState()[17]
+        val firstEpoch = input.joyConState()[RIGHT_EPOCH]
+        assertEquals(0, input.joyConState()[RIGHT_RECENTER])
         joyKey(right, 0x13c)
-        assertEquals(CONNECTED, input.joyConState()[9])
+        assertEquals(CONNECTED, input.joyConState()[RIGHT])
         now += 100_000_000L
         joyKey(right, 0x13c, KeyEvent.ACTION_UP)
-        assertEquals(CONNECTED or JoyCon.VR_SYSTEM, input.joyConState()[9])
+        assertEquals(CONNECTED or JoyCon.VR_SYSTEM, input.joyConState()[RIGHT])
         now += 120_000_000L
-        assertEquals(CONNECTED, input.joyConState()[9])
-        assertEquals(firstEpoch, input.joyConState()[17])
+        assertEquals(CONNECTED, input.joyConState()[RIGHT])
+        assertEquals(firstEpoch, input.joyConState()[RIGHT_EPOCH])
+        assertEquals(0, input.joyConState()[RIGHT_RECENTER])
         joyKey(right, 0x13c)
         now += 799_000_000L
         joyKey(right, 0x13c, repeat = 1)
-        assertEquals(firstEpoch, input.joyConState()[17])
+        assertEquals(firstEpoch, input.joyConState()[RIGHT_EPOCH])
         now += 1_000_000L
-        assertEquals(firstEpoch + 1, input.joyConState()[17])
+        assertEquals(firstEpoch + 1, input.joyConState()[RIGHT_EPOCH])
+        assertEquals(1, input.joyConState()[RIGHT_RECENTER])
         now += 1_000_000_000L
-        assertEquals(firstEpoch + 1, input.joyConState()[17])
+        assertEquals(firstEpoch + 1, input.joyConState()[RIGHT_EPOCH])
         joyKey(right, 0x13c, KeyEvent.ACTION_UP)
-        assertEquals(CONNECTED, input.joyConState()[9])
-        assertEquals(firstEpoch + 1, input.joyConState()[17])
+        assertEquals(CONNECTED, input.joyConState()[RIGHT])
+        assertEquals(firstEpoch + 1, input.joyConState()[RIGHT_EPOCH])
         assertEquals(0, input.menuSequence)
+    }
+
+    @Test fun sameDeviceUpdateReleasesButtonsWithoutChangingOrientationOrManualSequence() {
+        val right = joyCon(102, JoyCon.RIGHT, MotionEvent.AXIS_RX, MotionEvent.AXIS_RY)
+        input.onInputDeviceAdded(right.id)
+        orientation.samples[1] = XrJoyConOrientation(Quaternion(.5f, .5f, -.5f, .5f), now, 12, 1.2f, 4)
+        joyKey(right, 0x139)
+        joyMotion(right, MotionEvent.AXIS_RX to 1f)
+        joyKey(right, 0x13c)
+        val before = input.joyConState().copyOfRange(RIGHT + XrJoyConSnapshot.QUATERNION_X, XrJoyConSnapshot.SIZE)
+        input.onInputDeviceChanged(right.id)
+        assertArrayEquals(intArrayOf(0, 0, 0, CONNECTED, 0, 0), controls())
+        assertArrayEquals(before, input.joyConState().copyOfRange(RIGHT + XrJoyConSnapshot.QUATERNION_X, XrJoyConSnapshot.SIZE))
+        now += 900_000_000L
+        assertEquals(4, input.joyConState()[RIGHT_RECENTER])
+        assertEquals(0, input.menuSequence)
+    }
+
+    @Test fun manualRecenterSequenceSurvivesPauseAndDeviceResetWithoutExtraRequests() {
+        val right = joyCon(102, JoyCon.RIGHT)
+        input.onInputDeviceAdded(right.id)
+        joyKey(right, 0x13c)
+        now += 800_000_000L
+        assertEquals(1, input.joyConState()[RIGHT_RECENTER])
+        val epoch = input.joyConState()[RIGHT_EPOCH]
+        input.pause()
+        input.resume()
+        assertTrue(input.joyConState()[RIGHT_EPOCH] > epoch)
+        assertEquals(1, input.joyConState()[RIGHT_RECENTER])
+        input.onInputDeviceRemoved(right.id)
+        input.onInputDeviceAdded(right.id)
+        assertEquals(1, input.joyConState()[RIGHT_RECENTER])
+        assertEquals(0, input.joyConState()[XrJoyConSnapshot.RECENTER_SEQUENCE])
     }
 
     @Test fun systemHoldIsRecognisedOnReleaseEvenWithoutSnapshotPolling() {
         val right = joyCon(102, JoyCon.RIGHT)
         input.onInputDeviceAdded(right.id)
-        val epoch = input.joyConState()[17]
+        val epoch = input.joyConState()[RIGHT_EPOCH]
         joyKey(right, 0x13c)
         now += 800_000_000L
         joyKey(right, 0x13c, KeyEvent.ACTION_UP)
-        assertEquals(epoch + 1, input.joyConState()[17])
-        assertEquals(CONNECTED, input.joyConState()[9])
+        assertEquals(epoch + 1, input.joyConState()[RIGHT_EPOCH])
+        assertEquals(CONNECTED, input.joyConState()[RIGHT])
     }
 
     @Test fun cancelledAndRepeatedSystemEventsDoNotProduceDashboardOrRecenter() {
         val right = joyCon(102, JoyCon.RIGHT)
         input.onInputDeviceAdded(right.id)
-        val epoch = input.joyConState()[17]
+        val epoch = input.joyConState()[RIGHT_EPOCH]
         joyKey(right, 0x13c, repeat = 1)
         now += 900_000_000L
         joyKey(right, 0x13c, KeyEvent.ACTION_UP)
-        assertEquals(CONNECTED, input.joyConState()[9])
-        assertEquals(epoch, input.joyConState()[17])
+        assertEquals(CONNECTED, input.joyConState()[RIGHT])
+        assertEquals(epoch, input.joyConState()[RIGHT_EPOCH])
         joyKey(right, 0x130)
         joyKey(right, 0x13c)
         assertTrue(input.key(KeyEvent(1L, 2L, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BUTTON_MODE,
             0, 0, right.id, 0x13c, KeyEvent.FLAG_CANCELED, InputDevice.SOURCE_GAMEPAD)))
         now += 900_000_000L
-        assertEquals(CONNECTED or JoyCon.VR_A, input.joyConState()[9])
-        assertEquals(epoch, input.joyConState()[17])
+        assertEquals(CONNECTED or JoyCon.VR_A, input.joyConState()[RIGHT])
+        assertEquals(epoch, input.joyConState()[RIGHT_EPOCH])
         assertEquals(0, input.menuSequence)
     }
 
     @Test fun focusLossCancelsSystemHoldAndPauseStopsMotionBeforeReconnect() {
         val right = joyCon(102, JoyCon.RIGHT)
         input.onInputDeviceAdded(right.id)
-        val epoch = input.joyConState()[17]
+        val epoch = input.joyConState()[RIGHT_EPOCH]
         joyKey(right, 0x13c)
         input.focus(false)
         now += 900_000_000L
-        assertArrayEquals(IntArray(18), input.joyConState())
+        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.joyConState())
         input.focus(true)
         joyKey(right, 0x13c, KeyEvent.ACTION_UP)
-        assertEquals(CONNECTED, input.joyConState()[9])
-        assertEquals(epoch, input.joyConState()[17])
+        assertEquals(CONNECTED, input.joyConState()[RIGHT])
+        assertEquals(epoch, input.joyConState()[RIGHT_EPOCH])
         input.pause()
         assertNull(orientation.owned[1])
-        assertArrayEquals(IntArray(18), input.joyConState())
+        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.joyConState())
         input.resume()
         assertEquals(right.id, orientation.owned[1])
-        assertTrue(input.joyConState()[17] > epoch)
-        val resumedEpoch = input.joyConState()[17]
+        assertTrue(input.joyConState()[RIGHT_EPOCH] > epoch)
+        val resumedEpoch = input.joyConState()[RIGHT_EPOCH]
         input.onInputDeviceChanged(right.id)
-        assertTrue(input.joyConState()[17] > resumedEpoch)
+        assertEquals(resumedEpoch, input.joyConState()[RIGHT_EPOCH])
         input.onInputDeviceRemoved(right.id)
         assertNull(orientation.owned[1])
-        assertEquals(0, input.joyConState()[9])
+        assertEquals(0, input.joyConState()[RIGHT])
         input.close()
         assertTrue(orientation.closed)
     }
 
     private fun controls(source: XrGamepadInput = input): IntArray {
         val state = source.joyConState()
-        return intArrayOf(state[0], state[1], state[2], state[9], state[10], state[11])
+        return intArrayOf(state[0], state[1], state[2], state[RIGHT], state[RIGHT + XrJoyConSnapshot.STICK_X], state[RIGHT + XrJoyConSnapshot.STICK_Y])
     }
 
     private class FakeMotion : XrJoyConMotionSource {
@@ -438,14 +486,16 @@ class XrGamepadInputTest {
         override fun devices(devices: Array<InputDevice?>) {
             for (side in owned.indices) if (owned[side] != devices[side]?.id) {
                 owned[side] = devices[side]?.id
-                samples[side] = XrJoyConOrientation(epoch = samples[side].epoch + 1)
+                samples[side] = XrJoyConOrientation(epoch = samples[side].epoch + 1,
+                    recenterSequence = samples[side].recenterSequence)
             }
         }
         override fun snapshot(side: Int): XrJoyConOrientation {
             beforeSnapshot(side)
             return samples[side]
         }
-        override fun recenter(side: Int) { samples[side] = samples[side].copy(epoch = samples[side].epoch + 1) }
+        override fun recenter(side: Int) { samples[side] = samples[side].copy(epoch = samples[side].epoch + 1,
+            recenterSequence = samples[side].recenterSequence + 1) }
         override fun close() { closed = true }
     }
 
@@ -475,5 +525,9 @@ class XrGamepadInputTest {
 
     private companion object {
         const val CONNECTED = 1 shl 6
+        const val RIGHT = XrJoyConSnapshot.STRIDE
+        const val RIGHT_EPOCH = RIGHT + XrJoyConSnapshot.EPOCH
+        const val RIGHT_FRESH = RIGHT + XrJoyConSnapshot.FRESH
+        const val RIGHT_RECENTER = RIGHT + XrJoyConSnapshot.RECENTER_SEQUENCE
     }
 }

@@ -40,6 +40,28 @@ The existing `scene-focus.json` controls local glove visibility: only a live Ste
 
 Holding both runtime pinch values requests a system-button pulse after releasing trigger/grip. Ordinary gamepads route through PadBridge; View/Select + Menu/Start requests the same pulse. A gamepad does not become a tracked hand, and applications must support gamepad navigation. Orientation, drag and menu recall still need hardware acceptance.
 
+## Joy-Con heading stabilization
+
+In hybrid Joy-Con mode, the controller's IMU supplies aim and OpenXR hands supply position.
+To establish an optical heading reference, look forward, point the Joy-Con forward with the
+hand visible, and hold Capture (left) or Home (right) for 0.8 seconds. Keep the hand steady
+for another half second. Each side learns its own palm-to-controller orientation from a
+500 ms stable tracking window within three seconds of recentering. Recenter still works
+without visible hands; in that case optical stabilization stays inactive.
+
+Once calibrated, steady tracked palms and wrists can correct yaw at up to one degree per
+second, with a one-degree deadband and five-second response. Pitch, roll, buttons and immediate
+IMU motion remain unchanged. Correction pauses during swings, stale sensors, optical loss or
+reacquisition. Persistent errors above 30 degrees or inconsistent hand orientation require
+another recenter. A changed grip can resemble drift; recalibrate after changing the grip.
+The reference is not saved across controller/fusion resets or XR session/origin changes.
+
+Ordinary device metadata changes preserve fusion and heading when controller and sensor
+identities match. Diagnostics distinguish manual recenter, sensor reset and missing samples.
+The `joyConHeading` entries in `xr-health.json` report reference readiness, heading error,
+applied correction, sample age and alignment reason. Optical calibration needs actual tracked
+joint poses; inferred hand positions, aiming rays and the stomach-level fallback are not references.
+
 ## Protocol and rendering
 
 The existing 296-byte tracking protocol v1 is unchanged. Quest continues to publish `active=1`; Android XR uses an explicit active-session marker to select its additional input path. The driver reads input-v2 and skeleton sidecars only in that Android XR session. Sidecars carry session generation, origin epoch and timestamps, with atomic snapshots and single-writer ownership.

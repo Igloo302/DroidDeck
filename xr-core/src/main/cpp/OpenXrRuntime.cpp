@@ -222,7 +222,7 @@ public:
             "\"headPosition\":[%.6f,%.6f,%.6f],\"controllersActive\":[%s,%s],\"handsActive\":[%s,%s],"
             "\"periodNs\":%lld,\"surfaceSwapchain\":%s,\"source\":\"%s\",\"guestFrames\":%lld,\"steamvrState\":%d,"
             "\"receivedFrames\":%llu,\"rejectedFrames\":%llu,\"uploadedFrames\":%llu,\"sourceFrameId\":%llu,"
-            "\"gpuReceivedFrames\":%llu,\"gpuDroppedFrames\":%llu,\"gpuAsyncCompletion\":%s,\"gpuCompletionFailures\":%llu,\"gpuVerifiedFrameId\":%llu,\"gpuChecksum\":%u,\"error\":%s,\"runtime\":%s,\"runtimeVersion\":%s,\"inputMode\":\"%s\",\"generation\":%llu,\"originEpoch\":%llu,\"profiles\":[%s,%s],\"handPinch\":[%g,%g],\"handSelect\":[%g,%g],\"handPinchPresses\":[%llu,%llu],\"handPinchReleases\":[%llu,%llu],\"floorKnown\":%s,\"handProviders\":[%s,%s],\"eyeSeparationMeters\":%g,\"skeletonActive\":[%u,%u],\"jointPermission\":%s,\"transferMs\":%g,\"sourceAgeMs\":%g,\"gamepadKeyEvents\":%llu,\"gamepadMotionEvents\":%llu,\"gamepadMenuSequence\":%u,\"handMeshReady\":%s,\"handMeshVisible\":%s,\"handMeshDraws\":%llu,\"joyConActive\":[%u,%u],\"joyConOrientationFlags\":[%u,%u]}\n",
+            "\"gpuReceivedFrames\":%llu,\"gpuDroppedFrames\":%llu,\"gpuAsyncCompletion\":%s,\"gpuCompletionFailures\":%llu,\"gpuVerifiedFrameId\":%llu,\"gpuChecksum\":%u,\"error\":%s,\"runtime\":%s,\"runtimeVersion\":%s,\"inputMode\":\"%s\",\"generation\":%llu,\"originEpoch\":%llu,\"profiles\":[%s,%s],\"handPinch\":[%g,%g],\"handSelect\":[%g,%g],\"handPinchPresses\":[%llu,%llu],\"handPinchReleases\":[%llu,%llu],\"floorKnown\":%s,\"handProviders\":[%s,%s],\"eyeSeparationMeters\":%g,\"skeletonActive\":[%u,%u],\"jointPermission\":%s,\"transferMs\":%g,\"sourceAgeMs\":%g,\"gamepadKeyEvents\":%llu,\"gamepadMotionEvents\":%llu,\"gamepadMenuSequence\":%u,\"handMeshReady\":%s,\"handMeshVisible\":%s,\"handMeshDraws\":%llu,\"joyConActive\":[%u,%u],\"joyConOrientationFlags\":[%u,%u],\"joyConHeading\":[",
             (unsigned long long)frames_, (unsigned long long)rendered_, state_,
             (unsigned long long)head_.locationFlags,
             finite(head_.pose.position.x), finite(head_.pose.position.y), finite(head_.pose.position.z),
@@ -246,6 +246,21 @@ public:
             (unsigned long long)gamepadKeys_, (unsigned long long)gamepadMotions_, handPacket_.gamepad_menu_sequence,
             handVisuals_.ready() ? "true" : "false", showHandVisuals_ ? "true" : "false", (unsigned long long)handVisualDraws_,
             joyConHands_[0].active, joyConHands_[1].active, joyConHands_[0].pose.flags, joyConHands_[1].pose.flags);
+        const auto now = xr_monotonic_ns();
+        for (int hand = 0; hand < 2; ++hand) {
+            const auto &orientation = joyConOrientations_[hand];
+            const auto &correction = orientation.correction();
+            const auto sample = orientation.sampleTimeNs();
+            std::fprintf(file,
+                "%s{\"status\":\"%s\",\"calibrated\":%s,\"errorDegrees\":%g,\"correctionDegrees\":%g,"
+                "\"sampleAgeMs\":%g,\"epoch\":%d,\"recenterSequence\":%d,\"alignments\":%llu,\"alignmentReason\":\"%s\"}",
+                hand ? "," : "", correction.statusName(), correction.calibrated() ? "true" : "false",
+                finite(correction.errorRadians() * 180. / M_PI), finite(correction.correctionRadians() * 180. / M_PI),
+                sample > 0 && now >= sample ? double(now - sample) * 1e-6 : -1.,
+                orientation.epoch(), orientation.recenterSequence(), (unsigned long long)orientation.alignmentCount(),
+                orientation.alignmentReason());
+        }
+        std::fputs("]}\n", file);
         std::fclose(file);
         std::rename(temp.c_str(), path.c_str());
     }
@@ -259,6 +274,7 @@ private:
     DroidDeckXrInputV2 handPacket_{};
     uint64_t gamepadKeys_ = 0, gamepadMotions_ = 0;
     DroidDeckXrSkeleton skeleton_{};
+    int64_t opticalSampleNs_ = 0;
     JoyConXrOrientation joyConOrientations_[2];
     std::array<DroidDeckXrHand, 2> joyConHands_{};
     XrAtomicFile<DroidDeckXrSkeleton> skeletonFile_;
@@ -668,6 +684,7 @@ private:
     }
 
     void releaseHands() noexcept {
+        for (auto &orientation : joyConOrientations_) orientation.pause();
         handActive_[0] = handActive_[1] = false;
         handPacket_ = droiddeck_xr_input_v2_neutral(runtimeSession_.generation, runtimeSession_.originEpoch);
         handPacket_.sample_monotonic_ns = droiddeck_clock_domain_now_ns();
@@ -679,6 +696,7 @@ private:
     }
 
     void releaseSkeleton() {
+        opticalSampleNs_ = 0;
         skeleton_ = {};
         skeleton_.session_generation = runtimeSession_.generation;
         skeleton_.origin_epoch = runtimeSession_.originEpoch;
@@ -689,6 +707,7 @@ private:
     void sampleHands(XrTime predicted) {
         handPacket_ = droiddeck_xr_input_v2_neutral(runtimeSession_.generation, runtimeSession_.originEpoch);
         const auto sampled = xr_monotonic_ns();
+        opticalSampleNs_ = sampled;
         handPacket_.sample_monotonic_ns = droiddeck_clock_domain_adjust_ns(sampled);
         const auto clockShift = sampled - handPacket_.sample_monotonic_ns;
         skeleton_ = {};
@@ -976,11 +995,26 @@ private:
         packet.head = posePacket(head_.pose, head_.locationFlags);
         const auto joyCons = handMode_ && state_ == XR_SESSION_STATE_FOCUSED
             ? callbacks_->joyConState() : JoyConSnapshot{};
+        const auto joyConNow = xr_monotonic_ns();
         for (int eye = 0; eye < 2; eye++) {
+            JoyConOpticalReference optical;
+            if (skeleton_.active[eye] && skeleton_.session_generation == runtimeSession_.generation &&
+                    skeleton_.origin_epoch == runtimeSession_.originEpoch) {
+                optical = {skeleton_.joints[eye][XR_HAND_JOINT_PALM_EXT],
+                    skeleton_.joints[eye][XR_HAND_JOINT_WRIST_EXT], opticalSampleNs_};
+            }
+            auto &orientation = joyConOrientations_[eye];
+            const auto previousAlignments = orientation.alignmentCount();
             joyConHands_[eye] = state_ == XR_SESSION_STATE_FOCUSED
-                ? joyConOrientations_[eye].update(joyCons.data() + eye*kJoyConSnapshotStride,
-                    packet.head, runtimeSession_.generation, runtimeSession_.originEpoch)
+                ? orientation.update(joyCons.data() + eye*kJoyConSnapshotStride,
+                    packet.head, runtimeSession_.generation, runtimeSession_.originEpoch, optical, joyConNow)
                 : DroidDeckXrHand{};
+            if (orientation.alignmentCount() != previousAlignments)
+                __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR",
+                    "Joy-Con alignment side=%d reason=%s epoch=%d recenter=%d session=%llu origin=%llu yaw=%g",
+                    eye, orientation.alignmentReason(), orientation.epoch(), orientation.recenterSequence(),
+                    (unsigned long long)runtimeSession_.generation, (unsigned long long)runtimeSession_.originEpoch,
+                    orientation.headingOffset());
             if (validViews) {
                 packet.eyes[eye].pose = posePacket(views[eye].pose, viewFlags_);
                 packet.eyes[eye].fov[0] = views[eye].fov.angleLeft;

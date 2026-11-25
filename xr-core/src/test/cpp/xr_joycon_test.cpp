@@ -25,7 +25,80 @@ static void expectRotation(const DroidDeckXrHand &hand, const Quat &expected) {
     for (float position : hand.pose.position) assert(position == 0);
 }
 
+static void testOpticalRecenterLifecycle() {
+    constexpr int64_t step = 20000000;
+    int64_t now = (int64_t(7) << 32) + 1000000000;
+    int32_t values[kJoyConSnapshotStride]{(1 << 6) | DROIDDECK_JOYCON_TRIGGER};
+    const Quat palm = AboutY(.4) * AboutX(-.5);
+    JoyConOpticalReference optical;
+    optical.palm = {{.3f, 1.2f, -.4f}, {float(palm.x), float(palm.y), float(palm.z), float(palm.w)}, 15};
+    optical.wrist = optical.palm;
+    JoyConXrOrientation tracker;
+    uint64_t session = 1, origin = 1;
+    const auto update = [&](const Quat &imu = Quat{}, const Quat &head = Quat{}) {
+        now += step;
+        values[9] = int32_t(uint32_t(now)); values[10] = int32_t(uint64_t(now) >> 32);
+        rotation(values, imu);
+        optical.sampledNs = now;
+        return tracker.update(values, headPose(head), session, origin, optical, now);
+    };
+    for (int i = 0; i < 30; ++i) expectRotation(update(), {});
+    assert(!tracker.correction().calibrated());
+    assert(tracker.sampleTimeNs() == now && tracker.alignmentCount() == 1);
+    const auto calibrate = [&] {
+        ++values[8]; ++values[12];
+        for (int i = 0; i < 30; ++i) expectRotation(update(), {});
+        assert(tracker.correction().calibrated());
+        assert(std::strcmp(tracker.alignmentReason(), "recenter") == 0);
+    };
+    calibrate();
+    const Quat drift = AboutY(.1);
+    for (int i = 0; i < 80; ++i) {
+        const auto previousYaw = tracker.headingOffset();
+        const auto hand = update(drift, AboutY(-.8));
+        assert(hand.trigger == 1 && hand.pose.flags == 5);
+        assert(std::abs(tracker.headingOffset() - previousYaw) <= step * 1e-9 * M_PI / 180. + 1e-9);
+    }
+    assert(tracker.headingOffset() < -.01);
+    const auto corrected = tracker.headingOffset();
+    tracker.pause();
+    now += 2000000000;
+    for (int i = 0; i < 25; ++i) {
+        expectRotation(update(drift), AboutY(corrected) * drift);
+        assert(tracker.headingOffset() == corrected);
+    }
+    values[7] = 0;
+    auto hand = tracker.update(values, headPose({}), session, origin, optical, now);
+    assert(hand.trigger == 1 && !hand.pose.flags && tracker.correction().calibrated());
+    values[7] = 1;
+    hand = tracker.update(values, headPose({}), session, origin, optical, now + 100000001);
+    assert(hand.trigger == 1 && !hand.pose.flags && tracker.correction().calibrated());
+    ++values[8];
+    expectRotation(update(), {});
+    assert(!tracker.correction().calibrated());
+    assert(std::strcmp(tracker.alignmentReason(), "motion-reset") == 0);
+    calibrate();
+    ++origin;
+    expectRotation(update(), {});
+    assert(!tracker.correction().calibrated());
+    calibrate();
+    ++session;
+    expectRotation(update(), {});
+    assert(!tracker.correction().calibrated());
+    calibrate();
+    values[0] = 0;
+    assert(!tracker.update(values, headPose({}), session, origin, optical, now).active);
+    values[0] = (1 << 6) | DROIDDECK_JOYCON_TRIGGER;
+    for (int i = 0; i < 30; ++i) expectRotation(update(), {});
+    assert(!tracker.correction().calibrated());
+    calibrate();
+    values[3] = int32_t(0x7fc00000);
+    hand = tracker.update(values, headPose({}), session, origin, optical, now);
+    assert(!hand.pose.flags && hand.trigger == 1 && !tracker.correction().calibrated());
+}
+
 int main() {
+    testOpticalRecenterLifecycle();
     int32_t values[3]{(1 << 6) | DROIDDECK_JOYCON_TRIGGER | DROIDDECK_JOYCON_GRIP |
         DROIDDECK_JOYCON_A | DROIDDECK_JOYCON_B | DROIDDECK_JOYCON_STICK | DROIDDECK_JOYCON_SYSTEM,
         -32767, 32767};

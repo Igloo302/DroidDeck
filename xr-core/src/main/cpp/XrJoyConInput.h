@@ -3,13 +3,14 @@
 #include "xr_tracking.h"
 #include "xr_input_v2.h"
 #include "arm_model.h"
+#include "XrJoyConHeading.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
 
 namespace droiddeck::xr {
 
-constexpr int kJoyConSnapshotStride = 9;
+constexpr int kJoyConSnapshotStride = 13;
 using JoyConSnapshot = std::array<int32_t, 2*kJoyConSnapshotStride>;
 
 inline DroidDeckXrHand joyConControls(const int32_t values[3]) {
@@ -34,19 +35,37 @@ inline DroidDeckXrHand joyConControls(const int32_t values[3]) {
 class JoyConXrOrientation {
 public:
     DroidDeckXrHand update(const int32_t values[kJoyConSnapshotStride], const DroidDeckXrPose &head,
-                          uint64_t session, uint64_t origin) {
+                          uint64_t session, uint64_t origin, const JoyConOpticalReference &optical = {}, int64_t now = 0) {
         auto hand = joyConControls(values);
-        if (!hand.active) { aligned_ = false; connected_ = false; return hand; }
-        if (!connected_ || epoch_ != values[8] || session_ != session || origin_ != origin) {
-            aligned_ = false;
-            epoch_ = values[8]; session_ = session; origin_ = origin;
+        if (!hand.active) {
+            aligned_ = connected_ = false;
+            sampleNs_ = 0;
+            correction_.reset();
+            return hand;
         }
+        const bool recentered = connected_ && session_ == session && origin_ == origin && recenter_ != values[12];
+        if (!connected_ || epoch_ != values[8] || session_ != session || origin_ != origin || recentered) {
+            alignmentReason_ = !connected_ ? "connected" : session_ != session ? "session" :
+                origin_ != origin ? "origin" : recentered ? "recenter" : "motion-reset";
+            aligned_ = false;
+            correction_.reset();
+            epoch_ = values[8]; session_ = session; origin_ = origin;
+            if (recentered && now > 0) correction_.recenter(now);
+        }
+        recenter_ = values[12];
         connected_ = true;
-        if (!values[7]) return hand;
+        const auto sampleBits = uint64_t(uint32_t(values[9])) | (uint64_t(uint32_t(values[10])) << 32);
+        sampleNs_ = sampleBits <= INT64_MAX ? int64_t(sampleBits) : 0;
+        float angularSpeed;
+        std::memcpy(&angularSpeed, values + 11, sizeof(angularSpeed));
+        if (!values[7] || (now > 0 && (sampleNs_ <= 0 || now < sampleNs_ || now - sampleNs_ > 100000000LL))) {
+            correction_.pause();
+            return hand;
+        }
         float orientation[4];
         std::memcpy(orientation, values + 3, sizeof(orientation));
         Quat imu;
-        if (!decode(orientation, imu)) return hand;
+        if (!decode(orientation, imu)) { correction_.reset(); return hand; }
         if (!aligned_) {
             Quat headRotation;
             double headYaw = 0, imuYaw = 0;
@@ -54,13 +73,24 @@ public:
                 !Heading(headRotation, &headYaw) || !Heading(imu, &imuYaw)) return hand;
             yaw_ = headYaw - imuYaw;
             aligned_ = true;
+            ++alignments_;
         }
+        if (now > 0) yaw_ += correction_.update(Normalize(AboutY(yaw_) * imu), sampleNs_, angularSpeed, optical, now);
         const auto world = Normalize(AboutY(yaw_) * imu);
         hand.pose.orientation[0] = float(world.x); hand.pose.orientation[1] = float(world.y);
         hand.pose.orientation[2] = float(world.z); hand.pose.orientation[3] = float(world.w);
         hand.pose.flags = DROIDDECK_XR_ORIENTATION_VALID | DROIDDECK_XR_ORIENTATION_TRACKED;
         return hand;
     }
+
+    void pause() { correction_.pause(); }
+    const JoyConHeadingCorrection &correction() const { return correction_; }
+    int32_t epoch() const { return epoch_; }
+    int32_t recenterSequence() const { return recenter_; }
+    int64_t sampleTimeNs() const { return sampleNs_; }
+    uint64_t alignmentCount() const { return alignments_; }
+    const char *alignmentReason() const { return alignmentReason_; }
+    double headingOffset() const { return yaw_; }
 
 private:
     static bool decode(const float values[4], Quat &result) {
@@ -74,8 +104,11 @@ private:
         return true;
     }
     bool connected_ = false, aligned_ = false;
-    int32_t epoch_ = 0;
-    uint64_t session_ = 0, origin_ = 0;
+    int32_t epoch_ = 0, recenter_ = 0;
+    int64_t sampleNs_ = 0;
+    uint64_t session_ = 0, origin_ = 0, alignments_ = 0;
+    const char *alignmentReason_ = "none";
+    JoyConHeadingCorrection correction_;
     double yaw_ = 0;
 };
 

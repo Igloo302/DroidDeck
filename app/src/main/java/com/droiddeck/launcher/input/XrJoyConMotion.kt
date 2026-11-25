@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
+import android.util.Log
 import android.view.InputDevice
 import com.droiddeck.launcher.glasses.Quaternion
 
@@ -16,6 +17,8 @@ internal data class XrJoyConOrientation(
     val rotation: Quaternion = Quaternion.IDENTITY,
     val timeNs: Long = 0L,
     val epoch: Int = 0,
+    val angularSpeed: Float = 0f,
+    val recenterSequence: Int = 0,
 ) {
     fun fresh(nowNs: Long): Boolean = timeNs != 0L && nowNs - timeNs in 0..MAX_AGE_NS
 
@@ -29,35 +32,54 @@ internal interface XrJoyConMotionSource {
     fun close()
 }
 
-internal class XrJoyConMotionState {
+internal class XrJoyConMotionState(private val diagnostic: (String) -> Unit = {}) {
     private var filter = JoyConOrientation()
     private var reports = JoyConReports()
     private var calibration = JoyConAccelCalibration()
     private var arrivalNs = 0L
     private var current = XrJoyConOrientation()
+    private var resetCount = 0L
+    private var gapCount = 0L
+    private var sampleCount = 0L
 
-    @Synchronized fun reset(savedCalibration: FloatArray? = calibration.saved()) {
+    @Synchronized fun reset(savedCalibration: FloatArray? = calibration.saved(), reason: String = "reset") {
         filter = JoyConOrientation()
         reports = JoyConReports()
         calibration = JoyConAccelCalibration().apply { restore(savedCalibration) }
         arrivalNs = 0L
-        current = XrJoyConOrientation(epoch = current.epoch + 1)
+        current = XrJoyConOrientation(epoch = current.epoch + 1, recenterSequence = current.recenterSequence)
+        resetCount++
+        report("reset reason=$reason")
     }
 
-    @Synchronized fun recenter() { current = current.copy(epoch = current.epoch + 1) }
+    @Synchronized fun recenter() {
+        current = current.copy(epoch = current.epoch + 1, recenterSequence = current.recenterSequence + 1)
+        report("manual_recenter")
+    }
+    @Synchronized fun refreshListener() {
+        reports = JoyConReports()
+        report("listener_refresh")
+    }
     @Synchronized fun snapshot(): XrJoyConOrientation = current
+
+    private fun report(event: String) {
+        diagnostic("$event epoch=${current.epoch} manual=${current.recenterSequence} resets=$resetCount gaps=$gapCount samples=$sampleCount")
+    }
 
     @Synchronized fun add(accel: FloatArray, gyro: FloatArray, nowNs: Long): Int {
         if (accel.size < 3 || gyro.size < 3 || (0..2).any { !accel[it].isFinite() || !gyro[it].isFinite() }) {
-            reset()
+            reset(reason = "invalid_sample")
             return 0
         }
-        if (arrivalNs != 0L && nowNs < arrivalNs) reset()
+        if (arrivalNs != 0L && nowNs < arrivalNs) reset(reason = "clock_reversed")
         else if (arrivalNs != 0L && nowNs - arrivalNs > XrJoyConOrientation.MAX_AGE_NS) {
             reports = JoyConReports()
             current = current.copy(timeNs = 0L)
+            gapCount++
+            report("sample_gap durationNs=${nowNs - arrivalNs}")
         }
         arrivalNs = nowNs
+        sampleCount++
         reports.add(accel, gyro, nowNs)
         return reports.size
     }
@@ -70,19 +92,48 @@ internal class XrJoyConMotionState {
                 JoyConOrientation.axes(sample.gyro), sample.dt)
         }
         val q = filter.rotation
-        if (!q.w.isFinite() || !q.x.isFinite() || !q.y.isFinite() || !q.z.isFinite()) {
-            reset()
+        val speed = filter.rate.length()
+        if (!q.w.isFinite() || !q.x.isFinite() || !q.y.isFinite() || !q.z.isFinite() || !speed.isFinite()) {
+            reset(reason = "invalid_filter")
             return
         }
-        if (filter.ready) current = XrJoyConOrientation(q, arrivalNs, current.epoch)
+        if (filter.ready) current = current.copy(rotation = q, timeNs = arrivalNs, angularSpeed = speed)
     }
+}
+
+internal data class XrJoyConSensorIdentity(
+    val id: Int, val type: Int, val name: String, val vendor: String, val version: Int,
+    val resolution: Float, val maxRange: Float, val minDelay: Int,
+) {
+    companion object {
+        fun of(sensor: Sensor) = XrJoyConSensorIdentity(sensor.id, sensor.type, sensor.name.orEmpty(), sensor.vendor.orEmpty(),
+            sensor.version, sensor.resolution, sensor.maximumRange, sensor.minDelay)
+    }
+}
+
+internal data class XrJoyConSensors(val manager: SensorManager, val accel: Sensor, val gyro: Sensor) {
+    val identity get() = listOf(XrJoyConSensorIdentity.of(accel), XrJoyConSensorIdentity.of(gyro))
 }
 
 internal class XrJoyConMotion(
     private val context: Context,
     private val nowNs: () -> Long = System::nanoTime,
+    private val sensorsFor: (InputDevice) -> XrJoyConSensors? = { device ->
+        if (Build.VERSION.SDK_INT < 31) null else {
+            val manager = device.sensorManager
+            val accel = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            val gyro = manager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+            if (accel == null || gyro == null) null else XrJoyConSensors(manager, accel, gyro)
+        }
+    },
 ) : XrJoyConMotionSource {
-    private val states = Array(2) { XrJoyConMotionState() }
+    private data class DeviceIdentity(val id: Int, val descriptor: String, val side: Int)
+    private val identities = arrayOfNulls<DeviceIdentity>(2)
+    private val labels = Array(2) { "none" }
+    private val states = Array(2) { side -> XrJoyConMotionState { event ->
+        Log.i("DroidDeckXR", "joycon motion side=$side device=${labels[side]} $event")
+    } }
+    private val sensorIdentities = arrayOfNulls<List<XrJoyConSensorIdentity>>(2)
     private val wanted = arrayOfNulls<InputDevice>(2)
     private val hands = arrayOfNulls<Hand>(2)
     private var thread: HandlerThread? = null
@@ -94,12 +145,18 @@ internal class XrJoyConMotion(
     @Synchronized override fun devices(devices: Array<InputDevice?>) {
         if (closed) return
         for (side in states.indices) {
-            val device = devices[side]
-            if (wanted[side]?.id == device?.id && wanted[side]?.descriptor == device?.descriptor) continue
-            hands[side]?.stop()
-            hands[side] = null
+            val device = devices[side]?.takeIf { JoyCon.side(it) == side }
+            val identity = device?.let { DeviceIdentity(it.id, it.descriptor, side) }
+            if (identities[side] != identity) {
+                hands[side]?.stop()
+                hands[side] = null
+                labels[side] = (identity ?: identities[side]).toString()
+                identities[side] = identity
+                sensorIdentities[side] = null
+                states[side].reset(device?.let { JoyConCalibrations.load(context, it.descriptor) },
+                    if (device == null) "device_unavailable" else "device_changed")
+            }
             wanted[side] = device
-            states[side].reset(device?.let { JoyConCalibrations.load(context, it.descriptor) })
         }
         retries = 0
         connect()
@@ -118,20 +175,30 @@ internal class XrJoyConMotion(
 
     private fun connect() {
         worker?.removeCallbacks(retry)
-        if (Build.VERSION.SDK_INT < 31) return
         var waiting = false
         for (side in states.indices) {
             val device = wanted[side] ?: continue
-            if (hands[side] != null) continue
-            val sensors = runCatching { device.sensorManager }.getOrNull()
-            val accel = runCatching { sensors?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) }.getOrNull()
-            val gyro = runCatching { sensors?.getDefaultSensor(Sensor.TYPE_GYROSCOPE) }.getOrNull()
-            if (sensors == null || accel == null || gyro == null) { waiting = true; continue }
+            val sensors = runCatching { sensorsFor(device) }.getOrNull()
+            if (sensors == null) { waiting = true; continue }
+            val identity = sensors.identity
+            if (sensorIdentities[side] != null && sensorIdentities[side] != identity) {
+                hands[side]?.stop()
+                hands[side] = null
+                states[side].reset(reason = "sensors_changed")
+            }
+            sensorIdentities[side] = identity
+            val previous = hands[side]
+            if (previous?.matches(device, sensors) == true) continue
+            if (previous != null) {
+                previous.stop()
+                states[side].refreshListener()
+            }
+            hands[side] = null
             val handler = handler()
-            val hand = Hand(sensors, states[side], handler)
+            val hand = Hand(device, sensors, states[side], handler)
             val listening = runCatching {
-                sensors.registerListener(hand, accel, SensorManager.SENSOR_DELAY_FASTEST, handler) &&
-                    sensors.registerListener(hand, gyro, SensorManager.SENSOR_DELAY_FASTEST, handler)
+                sensors.manager.registerListener(hand, sensors.accel, SensorManager.SENSOR_DELAY_FASTEST, handler) &&
+                    sensors.manager.registerListener(hand, sensors.gyro, SensorManager.SENSOR_DELAY_FASTEST, handler)
             }.getOrDefault(false)
             if (listening) hands[side] = hand
             else { hand.stop(); waiting = true }
@@ -143,7 +210,8 @@ internal class XrJoyConMotion(
         .also { thread = it; it.start() }.let { Handler(it.looper).also { out -> worker = out } }
 
     private inner class Hand(
-        private val sensors: SensorManager,
+        private val device: InputDevice,
+        private val sensors: XrJoyConSensors,
         private val state: XrJoyConMotionState,
         private val handler: Handler,
     ) : SensorEventListener {
@@ -153,6 +221,9 @@ internal class XrJoyConMotion(
         private var live = true
         private val flush = Runnable { synchronized(this) { if (live) state.flush() } }
 
+        fun matches(device: InputDevice, sensors: XrJoyConSensors): Boolean = this.device === device &&
+            this.sensors.manager === sensors.manager && this.sensors.accel === sensors.accel && this.sensors.gyro === sensors.gyro
+
         @Synchronized override fun onSensorChanged(event: SensorEvent) {
             if (!live) return
             val now = nowNs()
@@ -161,7 +232,7 @@ internal class XrJoyConMotion(
                     if (event.timestamp == accelStamp) return
                     if (event.values.size < 3 || (0..2).any { !event.values[it].isFinite() }) {
                         accelAtNs = 0L
-                        state.reset()
+                        state.reset(reason = "invalid_accel")
                         return
                     }
                     accelStamp = event.timestamp
@@ -182,7 +253,7 @@ internal class XrJoyConMotion(
 
         @Synchronized fun stop() {
             live = false
-            runCatching { sensors.unregisterListener(this) }
+            runCatching { sensors.manager.unregisterListener(this) }
             handler.removeCallbacks(flush)
         }
     }
