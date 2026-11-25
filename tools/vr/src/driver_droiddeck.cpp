@@ -1771,6 +1771,7 @@ private:
                     DroidDeckXrSkeleton skeleton{};
                     if (!xrSkeleton_.read("/run/droiddeck/" DROIDDECK_XR_SKELETON_FILE, skeleton)) skeleton = {};
                     const int64_t now = xr_monotonic_ns();
+                    input = droiddeck::xr::xrHandInputForTracking(fresh ? &xr : nullptr, input, now);
                     if (droiddeck::xr::inputFresh(input, now))
                         xrHandMode_ = (input.flags & DROIDDECK_XR_INPUT_HAND_MODE) != 0;
                     droiddeck::xr::JoyConHandControls controls[2];

@@ -91,4 +91,20 @@ int main() {
     assert(!hand.pose.flags && hand.trigger == 1);
     rotation(sample, {0,0,0,0});
     assert(!tracker.update(sample, head, 2, 2).pose.flags);
+
+    for (int side = 0; side < 2; ++side) {
+        JoyConXrOrientation aligned;
+        int32_t controller[kJoyConSnapshotStride]{1 << 6};
+        rotation(controller, {});
+        expectRotation(aligned.update(controller, headPose({}), 3, 1), {});
+        const Quat roll{std::cos(.3), 0, 0, std::sin(.3)};
+        const auto fixed = AboutY(side ? .7 : -.7) * AboutX(-.4) * roll;
+        rotation(controller, fixed);
+        for (const auto &look : {AboutY(-1.1), AboutY(1.1), AboutX(.6), roll})
+            expectRotation(aligned.update(controller, headPose(look), 3, 1), fixed);
+        for (const auto &imu : {AboutY(-.8), AboutY(.8), AboutX(-.6), AboutX(.6), roll, Conjugate(roll)}) {
+            rotation(controller, imu);
+            expectRotation(aligned.update(controller, headPose(AboutY(.9)), 3, 1), imu);
+        }
+    }
 }

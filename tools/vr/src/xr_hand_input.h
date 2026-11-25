@@ -31,10 +31,19 @@ struct JoyConHandControls {
     DroidDeckXrPose pose{};
 };
 
+inline bool xrHandTrackingFresh(const DroidDeckXrTracking *tracking, int64_t now) {
+    return tracking && isAndroidXr(*tracking) && XrTrackingFile::Fresh(*tracking, now)
+        && now - tracking->sampled_ns <= 100000000LL;
+}
+
+inline DroidDeckXrInputV2 xrHandInputForTracking(const DroidDeckXrTracking *tracking,
+        const DroidDeckXrInputV2 &packet, int64_t now) {
+    return xrHandTrackingFresh(tracking, now) ? packet : DroidDeckXrInputV2{};
+}
+
 inline JoyConHandControls joyConHandControls(const DroidDeckXrTracking *tracking,
         const DroidDeckXrInputV2 &packet, int hand, int64_t now) {
-    if (!tracking || hand < 0 || hand > 1 || !isAndroidXr(*tracking) || !XrTrackingFile::Fresh(*tracking, now)
-            || now - tracking->sampled_ns > 100000000LL
+    if (hand < 0 || hand > 1 || !xrHandTrackingFresh(tracking, now)
             || !inputFresh(packet, now) || !(packet.flags & DROIDDECK_XR_INPUT_FOCUSED)
             || !(packet.flags & DROIDDECK_XR_INPUT_HAND_MODE)
             || tracking->hands[hand].active != DROIDDECK_XR_JOYCON_ACTIVE) return {};
