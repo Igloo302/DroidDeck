@@ -12,6 +12,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.dp
 import com.droiddeck.launcher.R
@@ -59,6 +61,7 @@ class AuraXrSettingsPanelTest {
     @Test fun portraitSetupShowsBothOptionsOffWithoutUsbDisplayControls() {
         showSetup()
         compose.onNodeWithTag("setup-glasses-tab-aura").assertExists()
+        zoom().assertIsEnabled().assert(zoomAt(100))
         toggle("aura-joycon-6dof").assertIsEnabled().assert(off())
         toggle("aura-camera-calibration").assertIsNotEnabled().assert(off())
         compose.onNodeWithText(text(R.string.aura_camera_calibration_requires_6dof)).assertExists()
@@ -99,6 +102,8 @@ class AuraXrSettingsPanelTest {
             }
         }
         compose.onNodeWithTag("glasses-tab-aura").assertExists()
+        zoom().performScrollTo().performSemanticsAction(SemanticsActions.SetProgress) { it(150f) }
+        assertEquals(150, AuraXrSettings.read(context).viewZoomPercent)
         toggle("aura-joycon-6dof").assertExists().performScrollTo().performClick()
         assertTrue(AuraXrSettings.read(context).joyCon6Dof)
         toggle("aura-camera-calibration").assertIsEnabled()
@@ -111,14 +116,28 @@ class AuraXrSettingsPanelTest {
         showSetup()
         toggle("aura-joycon-6dof").assertDoesNotExist()
         toggle("aura-camera-calibration").assertDoesNotExist()
+        zoom().assertDoesNotExist()
         compose.onNodeWithText(text(R.string.setup_glasses_connect)).assertExists()
     }
 
     @Test fun settingsSearchOnlyOffersAuraControlsOnTheMatchingDevice() {
-        assertEquals(setOf(R.string.aura_joycon_6dof, R.string.aura_camera_calibration),
+        assertEquals(setOf(R.string.aura_joycon_6dof, R.string.aura_camera_calibration, R.string.aura_view_zoom),
             SettingsIndex.search(context, "aura").map { it.title }.toSet())
+        assertEquals(listOf(R.string.aura_view_zoom), SettingsIndex.search(context, "aura fov").map { it.title })
         ShadowBuild.setModel("Another headset")
         assertTrue(SettingsIndex.search(context, "aura").isEmpty())
+    }
+
+    @Test fun viewZoomChangesLiveInFivePercentStepsWithoutEnablingCameraFeatures() {
+        showSetup()
+        zoom().assert(zoomAt(100)).performSemanticsAction(SemanticsActions.SetProgress) { it(177f) }
+        zoom().assert(zoomAt(175))
+        assertEquals(AuraXrPreferences(viewZoomPercent = 175), AuraXrSettings.read(context))
+        savePreview("zoom-portrait")
+        compose.runOnIdle { AuraXrSettings.setViewZoomPercent(context, 300) }
+        zoom().assert(zoomAt(300))
+        compose.runOnIdle { AuraXrSettings.reset(context) }
+        zoom().assert(zoomAt(100))
     }
 
     private fun showSetup() {
@@ -143,6 +162,9 @@ class AuraXrSettingsPanelTest {
         onLaunchAndroidApp = { _, _ -> }, onBackground = {}, onShareLogs = {}, onStop = {}, onClose = {})
 
     private fun toggle(key: String) = compose.onNodeWithTag("setting-$key")
+    private fun zoom() = compose.onNodeWithTag("aura-view-zoom")
+    private fun zoomAt(percent: Int) = SemanticsMatcher.expectValue(SemanticsProperties.ProgressBarRangeInfo,
+        ProgressBarRangeInfo(percent.toFloat(), 100f..300f))
     private fun text(id: Int) = context.getString(id)
     private fun off() = SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, text(R.string.widgets_off))
     private fun on() = SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, text(R.string.widgets_on))

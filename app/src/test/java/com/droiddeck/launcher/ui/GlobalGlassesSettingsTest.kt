@@ -88,6 +88,7 @@ class GlobalGlassesSettingsTest {
         show()
         openGlasses()
         compose.onNodeWithTag("setup-glasses-tab-aura").assertExists()
+        compose.onNodeWithTag("aura-view-zoom").assertExists()
         compose.onNodeWithTag("setting-aura-joycon-6dof").assertExists()
         compose.onNodeWithTag("setting-aura-camera-calibration").assertExists()
         compose.onNodeWithText(text(R.string.setup_glasses_connect)).assertDoesNotExist()

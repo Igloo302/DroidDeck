@@ -49,7 +49,12 @@ claim Joy-Cons for XR, subscribe to their IMU sensors, or publish hybrid control
 so hand-based placement, stomach-level fallback, optical heading correction and Joy-Con
 controller visuals remain inactive there. This gate does not depend on attached USB glasses.
 
-The puck has an AURA pane in Smart glasses settings. **Experimental Joy-Con 6DoF** and
+The puck has an AURA pane in Smart glasses settings. **SteamVR view zoom** defaults to
+100% and can magnify the view up to 300%. It applies the same per-eye visual zoom to the
+guest image and locally rendered gloves without changing SteamVR resolution settings or
+the physical lens field of view. It takes effect live and is independent of Joy-Con mode.
+
+**Experimental Joy-Con 6DoF** and
 **Camera-guided calibration** both default to off, including upgrades without saved choices.
 With 6DoF off, Joy-Con buttons and IMU aim remain active, and the existing arm model supplies
 inferred controller placement relative to the head. Optical hand poses and remembered optical

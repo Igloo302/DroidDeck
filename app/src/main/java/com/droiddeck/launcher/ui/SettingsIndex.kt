@@ -97,6 +97,8 @@ internal object SettingsIndex {
         SettingsEntry(SettingsPlace.TAB, R.string.rail_decky, tab = "decky", words = listOf("plugins", "plugin store", "homebrew", "loader")),
         SettingsEntry(SettingsPlace.TAB, R.string.rail_boot_movies, tab = "boot-movies", words = listOf("startup movie", "boot video", "animation", "steamdeckrepo")),
         s(SettingsSection.GLASSES, R.string.setup_tab_glasses, "xreal", "viture", "vr", "ar"),
+        SettingsEntry(SettingsPlace.SETTINGS, R.string.aura_view_zoom, section = SettingsSection.GLASSES,
+            words = listOf("aura", "steamvr", "zoom", "fov", "field of view", "magnification"), auraOnly = true),
         SettingsEntry(SettingsPlace.SETTINGS, R.string.aura_joycon_6dof, section = SettingsSection.GLASSES,
             words = listOf("aura", "joy-con", "6dof", "tracking", "experimental"), auraOnly = true),
         SettingsEntry(SettingsPlace.SETTINGS, R.string.aura_camera_calibration, section = SettingsSection.GLASSES,

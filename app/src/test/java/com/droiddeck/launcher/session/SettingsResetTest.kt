@@ -31,7 +31,10 @@ class SettingsResetTest {
         }
     }
 
-    @Test fun settingsGoBackToTheirDefaults() {
+    // API 33 AtomicFile replaces files with File.renameTo, which fails on the Windows Robolectric host.
+    @Test
+    @Config(sdk = [28])
+    fun settingsGoBackToTheirDefaults() {
         SessionPrefs.setTheme(app, "ocean")
         SessionPrefs.setBackDoubleTapMs(app, 100)
         SessionPrefs.setPenSetting(app, "pen", SessionPrefs.PEN_TOUCH)
@@ -58,6 +61,7 @@ class SettingsResetTest {
         prefs("steam_touch").edit().putBoolean("gyro", false).commit()
         com.droiddeck.launcher.xr.AuraXrSettings.setJoyCon6Dof(app, true)
         com.droiddeck.launcher.xr.AuraXrSettings.setCameraGuidedCalibration(app, true)
+        com.droiddeck.launcher.xr.AuraXrSettings.setViewZoomPercent(app, 200)
 
         assertTrue(SettingsReset.resetAll(app, gameProfiles = false))
 

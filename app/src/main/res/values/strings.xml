@@ -3167,7 +3167,9 @@
     <string name="setup_glasses_scope">Display and head-tracking settings are shared across DroidDeck menus, games and desktop sessions.</string>
     <string name="setup_glasses_connect">Connect smart glasses to change their display and tracking settings. Your saved settings are kept when you disconnect.</string>
     <string name="aura_settings_title" translatable="false">AURA</string>
-    <string name="aura_settings_scope">Joy-Con tracking settings for this AURA headset. Changes apply while SteamVR is running.</string>
+    <string name="aura_settings_scope">SteamVR view and Joy-Con tracking settings for this AURA headset. Changes apply while SteamVR is running.</string>
+    <string name="aura_view_zoom">SteamVR view zoom</string>
+    <string name="aura_view_zoom_hint" formatted="false">Magnify the SteamVR view. 100% keeps the normal field of view.</string>
     <string name="aura_joycon_group">AURA Joy-Cons</string>
     <string name="aura_joycon_6dof">Experimental Joy-Con 6DoF</string>
     <string name="aura_joycon_6dof_hint">Use hand tracking for controller position while Joy-Con motion controls rotation. Off uses 3DoF rotation tracking with an estimated controller position and no camera assistance.</string>

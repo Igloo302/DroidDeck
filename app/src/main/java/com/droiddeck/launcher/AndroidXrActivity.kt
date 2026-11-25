@@ -14,6 +14,7 @@ import com.droiddeck.launcher.session.SessionState
 import com.droiddeck.launcher.wayland.CompositorHost
 import com.droiddeck.launcher.wayland.WaylandCompositor
 import com.droiddeck.launcher.xr.SteamVrHandVisuals
+import com.droiddeck.launcher.xr.AuraXrSettings
 import com.droiddeck.launcher.session.SessionPrefs
 import java.io.File
 
@@ -45,6 +46,7 @@ class AndroidXrActivity : NativeActivity() {
     fun onXrInputFocus(focused: Boolean) = gamepad.focus(focused)
     fun onXrGamepadMenu(): Int = gamepad.menuSequence
     fun onXrJoyConState(): IntArray = gamepad.joyConState()
+    fun onXrViewZoom(): Float = AuraXrSettings.read(this).viewZoomPercent / 100f
 
     fun onXrGamepadKey(device: Int, source: Int, action: Int, code: Int, scan: Int,
                        repeat: Int, meta: Int, flags: Int, downTime: Long, eventTime: Long): Boolean =

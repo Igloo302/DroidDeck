@@ -31,6 +31,7 @@
 #include "OpenXrCompatibility.h"
 #include "MappedGuestXrAdapter.h"
 #include "XrJoyConInput.h"
+#include "XrViewZoom.h"
 #include "xr_skeleton.h"
 #include "Json.h"
 #include "ScopeExit.h"
@@ -75,6 +76,7 @@ public:
         joyConState_ = env_->GetMethodID(type, "onXrJoyConState", "()[I");
         handModel_ = env_->GetMethodID(type, "onXrHandModel", "(I)[B");
         showHands_ = env_->GetMethodID(type, "onXrShowHands", "()Z");
+        viewZoom_ = env_->GetMethodID(type, "onXrViewZoom", "()F");
         env_->DeleteLocalRef(type);
         checked();
     }
@@ -111,6 +113,7 @@ public:
         return data;
     }
     bool showHands() { const bool show = env_->CallBooleanMethod(app_->activity->clazz, showHands_); checked(); return show; }
+    float viewZoom() { const float zoom = env_->CallFloatMethod(app_->activity->clazz, viewZoom_); checked(); return zoom; }
     bool onInput(AInputEvent *event) {
         if (!gamepadKey_) return false;
         jboolean handled = false;
@@ -166,6 +169,7 @@ private:
     JNIEnv *env_;
     jmethodID gamepadKey_ = nullptr, gamepadMotion_ = nullptr, gamepadFocus_ = nullptr, gamepadMenu_ = nullptr;
     jmethodID handModel_ = nullptr, showHands_ = nullptr, joyConState_ = nullptr;
+    jmethodID viewZoom_ = nullptr;
     jmethodID active_ = nullptr, frame_ = nullptr, status_ = nullptr, error_ = nullptr;
 };
 }
@@ -263,7 +267,7 @@ public:
                 orientation.epoch(), orientation.recenterSequence(), (unsigned long long)orientation.alignmentCount(),
                 orientation.alignmentReason());
         }
-        std::fputs("]}\n", file);
+        std::fprintf(file, "],\"viewZoomPercent\":%g}\n", viewZoom_ * 100.f);
         std::fclose(file);
         std::rename(temp.c_str(), path.c_str());
     }
@@ -345,6 +349,7 @@ private:
     uint64_t uploadedFrames_ = 0, verifiedFrame_ = 0;
     uint32_t gpuChecksum_ = 0;
     GLuint sourceTexture_ = 0, sourceProgram_ = 0;
+    float viewZoom_ = 1;
     GLuint cpuTexture_ = 0;
     DroidDeckXrTracking *tracking_ = nullptr;
     DroidDeckXrHaptics *haptics_ = nullptr;
@@ -1085,7 +1090,7 @@ private:
         glGenFramebuffers(1, &framebuffer_);
         glGenVertexArrays(1, &vertexArray_);
         GLuint vertex = shader(GL_VERTEX_SHADER,
-            "#version 300 es\nout vec2 uv; uniform float eye; void main(){vec2 coordinate=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));uv=vec2(coordinate.x*0.5+eye*0.5,1.0-coordinate.y);gl_Position=vec4(coordinate*2.0-1.0,0.0,1.0);}");
+            "#version 300 es\nout vec2 uv; uniform vec4 sourceUv; void main(){vec2 coordinate=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));uv=coordinate*sourceUv.xy+sourceUv.zw;gl_Position=vec4(coordinate*2.0-1.0,0.0,1.0);}");
         GLuint fragment = shader(GL_FRAGMENT_SHADER,
             "#version 300 es\nprecision highp float; in vec2 uv; uniform sampler2D source; uniform float eye; out vec4 outputColor; void main(){float edge=0.5/float(textureSize(source,0).x);vec2 coordinate=vec2(clamp(uv.x,eye*0.5+edge,(eye+1.0)*0.5-edge),uv.y);outputColor=texture(source,coordinate);}");
         sourceProgram_ = glCreateProgram(); glAttachShader(sourceProgram_, vertex); glAttachShader(sourceProgram_, fragment);
@@ -1159,7 +1164,7 @@ private:
         }
     }
 
-    void render(Eye &eye, uint32_t image, int side) {
+    void render(Eye &eye, uint32_t image, int side, const XrViewZoom &zoom) {
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer_);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, eye.images[image].image, 0);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -1169,15 +1174,17 @@ private:
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, sourceTexture_);
         glUniform1i(glGetUniformLocation(sourceProgram_, "source"), 0);
         glUniform1f(glGetUniformLocation(sourceProgram_, "eye"), &eye == &eyes_[1] ? 1.f : 0.f);
+        const auto sourceUv = zoom.sourceUv(side);
+        glUniform4fv(glGetUniformLocation(sourceProgram_, "sourceUv"), 1, sourceUv.data());
         glDrawArrays(GL_TRIANGLES, 0, 3);
         if (showHandVisuals_ && handMode_ && state_ == XR_SESSION_STATE_FOCUSED) {
             const auto view = xr_frame_view(sourceHeader_, side);
             DroidDeckXrPoseV2 pose{{view.position[0],view.position[1],view.position[2]},
                 {view.orientation[0],view.orientation[1],view.orientation[2],view.orientation[3]}, 3};
             const auto inverse = handInverse(handTransform(pose));
-            SkinMatrix camera = skinIdentity(), projection{};
+            SkinMatrix camera = skinIdentity();
+            const auto projection = zoom.projection(sourceHeader_.projection[side]);
             for (int row = 0; row < 4; ++row) for (int column = 0; column < 4; ++column) {
-                projection[column*4+row] = sourceHeader_.projection[side][row][column];
                 if (row < 3) camera[column*4+row] = inverse.m[row][column];
             }
             auto visibleSkeleton = skeleton_;
@@ -1257,6 +1264,7 @@ private:
                 [&](XrTime change) { return change <= frameState.predictedDisplayTime; }), spaceChangeTimes_.end());
         }
         updateHandVisuals();
+        const float requestedViewZoom = callbacks_->viewZoom();
         check(xrLocateSpace(view_, world_, frameState.predictedDisplayTime, &head_), "head pose");
         handActive_[0] = handActive_[1] = false;
         if (state_ == XR_SESSION_STATE_FOCUSED) {
@@ -1333,6 +1341,8 @@ private:
         bool captured = valid;
         if (!capture.empty() && valid)
             captured = captureTexture(sourceTexture_, sourceHeader_.width, sourceHeader_.height, "source");
+        const auto viewZoom = viewZoomTransforms(sourceHeader_.projection, requestedViewZoom);
+        if (valid) viewZoom_ = viewZoom[0].scale;
         if (valid) for (int eye = 0; eye < 2; eye++) {
             uint32_t image = 0;
             XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
@@ -1348,7 +1358,7 @@ private:
             XrResult ready = xrWaitSwapchainImage(eyes_[eye].swapchain, &imageWait);
             if (ready != XR_SUCCESS) throw std::runtime_error("Swapchain wait timed out or session was lost: " + std::to_string(ready));
             waited = true;
-            render(eyes_[eye], image, eye);
+            render(eyes_[eye], image, eye, viewZoom[eye]);
             if (!capture.empty()) captured = captureTexture(eyes_[eye].images[image].image, eyes_[eye].width, eyes_[eye].height, eye ? "right" : "left") && captured;
             XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             XrResult released = xrReleaseSwapchainImage(eyes_[eye].swapchain, &release);

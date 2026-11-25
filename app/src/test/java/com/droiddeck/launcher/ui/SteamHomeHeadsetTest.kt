@@ -56,6 +56,7 @@ class SteamHomeHeadsetTest {
         show()
         compose.onNodeWithTag("drop-open").performClick()
         settle()
+        compose.onNodeWithTag("aura-view-zoom").assertExists()
         compose.onNodeWithTag("setting-aura-joycon-6dof").assertExists()
         compose.onNodeWithTag("setting-aura-camera-calibration").assertIsNotEnabled()
         compose.onNodeWithTag("setting-glasses-game").assertDoesNotExist()

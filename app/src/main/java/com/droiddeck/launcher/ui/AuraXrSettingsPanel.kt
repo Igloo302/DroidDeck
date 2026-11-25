@@ -9,6 +9,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import com.droiddeck.launcher.R
 import com.droiddeck.launcher.xr.AuraXrSettings
@@ -25,6 +26,11 @@ internal fun AuraXrSettingsPanel(host: MenuHost, track: (String) -> Modifier = {
         prefs.registerOnSharedPreferenceChangeListener(listener)
         settings = AuraXrSettings.stored(context)
         onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+    SettingsGroup(stringResource(R.string.cardboard_steamvr)) {
+        SliderRow(stringResource(R.string.aura_view_zoom), stringResource(R.string.aura_view_zoom_hint),
+            settings.viewZoomPercent, AuraXrSettings.VIEW_ZOOM_RANGE, step = 5, format = { "$it%" },
+            modifier = track("aura-view-zoom").testTag("aura-view-zoom")) { AuraXrSettings.setViewZoomPercent(context, it) }
     }
     SettingsGroup(stringResource(R.string.aura_joycon_group)) {
         ToggleRow(host, "aura-joycon-6dof", stringResource(R.string.aura_joycon_6dof),

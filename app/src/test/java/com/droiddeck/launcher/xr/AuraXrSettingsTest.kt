@@ -51,6 +51,7 @@ class AuraXrSettingsTest {
     @Test fun savedOptionsCannotEnableOtherDevices() {
         AuraXrSettings.setJoyCon6Dof(context, true)
         AuraXrSettings.setCameraGuidedCalibration(context, true)
+        AuraXrSettings.setViewZoomPercent(context, 225)
         for ((manufacturer, model, device) in listOf(
             Triple("Samsung", "Galaxy XR", "other-headset"),
             Triple("XREAL", "Another headset", "axrpuck"),
@@ -61,7 +62,7 @@ class AuraXrSettingsTest {
             ShadowBuild.setModel(model)
             ShadowBuild.setDevice(device)
             assertEquals(AuraXrPreferences(), AuraXrSettings.read(context))
-            assertEquals(AuraXrPreferences(true, true), AuraXrSettings.stored(context))
+            assertEquals(AuraXrPreferences(true, true, 225), AuraXrSettings.stored(context))
         }
     }
 
@@ -70,11 +71,30 @@ class AuraXrSettingsTest {
         glasses.edit().putBoolean("positionalTracking", true).commit()
         AuraXrSettings.setJoyCon6Dof(context, true)
         AuraXrSettings.setCameraGuidedCalibration(context, true)
+        AuraXrSettings.setViewZoomPercent(context, 175)
         val anotherContext = context.createConfigurationContext(context.resources.configuration)
-        assertEquals(AuraXrPreferences(true, true), AuraXrSettings.read(anotherContext))
+        assertEquals(AuraXrPreferences(true, true, 175), AuraXrSettings.read(anotherContext))
         assertTrue(glasses.getBoolean("positionalTracking", false))
         assertTrue(AuraXrSettings.reset(anotherContext))
         assertEquals(AuraXrPreferences(), AuraXrSettings.read(context))
         assertTrue(glasses.getBoolean("positionalTracking", false))
+    }
+
+    @Test fun viewZoomDefaultsToNormalAndClampsSavedValues() {
+        assertEquals(100, AuraXrSettings.read(context).viewZoomPercent)
+        for ((requested, expected) in listOf(Int.MIN_VALUE to 100, 99 to 100, 100 to 100,
+            175 to 175, 300 to 300, 301 to 300, Int.MAX_VALUE to 300)) {
+            AuraXrSettings.setViewZoomPercent(context, requested)
+            assertEquals(expected, AuraXrSettings.prefs(context).getInt("viewZoomPercent", -1))
+            assertEquals(AuraXrPreferences(viewZoomPercent = expected), AuraXrSettings.read(context))
+        }
+    }
+
+    @Test fun restoredOutOfRangeZoomCannotReachTheRenderer() {
+        for ((stored, expected) in listOf(-500 to 100, 0 to 100, 100 to 100, 150 to 150, 900 to 300)) {
+            AuraXrSettings.prefs(context).edit().putInt("viewZoomPercent", stored).commit()
+            assertEquals(expected, AuraXrSettings.read(context).viewZoomPercent)
+            assertEquals(expected, AuraXrSettings.stored(context).viewZoomPercent)
+        }
     }
 }
