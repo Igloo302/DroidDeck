@@ -1,4 +1,5 @@
 #pragma once
+#include "arm_model.h"
 #include "xr_hand_input.h"
 
 #define DROIDDECK_XR_SKELETON_FILE "droiddeck-xr-skeleton-v1"
@@ -73,7 +74,7 @@ inline DroidDeckXrPoseV2 joyConHandPose(const JoyConHandControls &controls, cons
 
 class JoyConHandPose {
 public:
-    void reset() { sampled_ = lastNow_ = 0; }
+    void reset() { sampled_ = lastNow_ = 0; headingSet_ = false; }
 
     DroidDeckXrPoseV2 update(const JoyConHandControls &controls, const DroidDeckXrInputV2 &input,
             const DroidDeckXrSkeleton &skeleton, int hand, int64_t now) {
@@ -84,20 +85,38 @@ public:
         int64_t sampled = 0;
         auto pose = joyConHandPose(controls, input, skeleton, hand, now, &sampled);
         if ((pose.flags & 5u) != 5u) { reset(); return {}; }
+        const auto &head = controls.head;
+        const bool haveHead = XrTrackingFile::Tracked(head);
+        if (haveHead) {
+            const Quat rotation{head.orientation[3], head.orientation[0], head.orientation[1], head.orientation[2]};
+            if (headingSet_) Heading(rotation, &heading_);
+            else { heading_ = HeadHeading(rotation); headingSet_ = true; }
+        }
         if (poseValid(pose) && sampled >= sampled_) {
             sampled_ = sampled;
             std::memcpy(position_, pose.position, sizeof(position_));
             return pose;
         }
-        // A held optical position is usable briefly, but is no longer tracked.
-        if (!sampled_ || now < sampled_ || now - sampled_ > 200000000LL) { reset(); return {}; }
-        std::memcpy(pose.position, position_, sizeof(position_));
+        const int64_t age = sampled_ ? now - sampled_ : kPositionHoldNs + kPositionBlendNs;
+        if (age <= kPositionHoldNs) {
+            std::memcpy(pose.position, position_, sizeof(position_));
+        } else {
+            if (!haveHead) { reset(); return {}; }
+            const Vec3 anchor = ArmModel::RestPosition(hand == 1, {head.position[0], head.position[1], head.position[2]}, heading_);
+            const double blend = std::clamp(double(age - kPositionHoldNs) / kPositionBlendNs, 0., 1.);
+            const Vec3 held{position_[0], position_[1], position_[2]};
+            const Vec3 position = sampled_ ? held + (anchor - held) * blend : anchor;
+            pose.position[0] = float(position.x); pose.position[1] = float(position.y); pose.position[2] = float(position.z);
+        }
         pose.flags = DROIDDECK_XR_ORIENTATION_VALID | DROIDDECK_XR_ORIENTATION_TRACKED | DROIDDECK_XR_POSITION_VALID;
         return pose;
     }
 
 private:
+    static constexpr int64_t kPositionHoldNs = 200000000LL, kPositionBlendNs = 200000000LL;
     float position_[3]{};
+    double heading_ = 0;
+    bool headingSet_ = false;
     int64_t sampled_ = 0, lastNow_ = 0;
     uint64_t generation_ = 0, epoch_ = 0;
 };

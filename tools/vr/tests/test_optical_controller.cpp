@@ -628,6 +628,233 @@ static void testXrJoyConUnknownTracking() {
     puts("PASS: unavailable tracking neutralizes hybrid pose/input without optical aim or model fallback");
 }
 
+struct JoyConRestFixture {
+    int64_t now = 1000000000;
+    DroidDeckXrInputV2 packet = droiddeck_xr_input_v2_neutral(101, 1);
+    DroidDeckXrTracking tracking{};
+    DroidDeckXrSkeleton skeleton{};
+    droiddeck::xr::JoyConHandPose poses[2];
+    JoyConRestFixture() {
+        packet.flags = DROIDDECK_XR_INPUT_FOCUSED | DROIDDECK_XR_INPUT_HAND_MODE;
+        tracking.active = DROIDDECK_ANDROID_XR_ACTIVE;
+        tracking.period_ns = 13888889;
+        tracking.eyes[0].width = tracking.eyes[0].height = 1024;
+        head({}, {.4, 1.7, -.2});
+        for (int side = 0; side < 2; ++side) {
+            tracking.hands[side].active = DROIDDECK_XR_JOYCON_ACTIVE;
+            tracking.hands[side].pose.flags = 5;
+            rotation(tracking.hands[side].pose.orientation, AboutY(side ? .6 : -.4) * AboutX(.3));
+            packet.hands[side].source = DROIDDECK_XR_SOURCE_RUNTIME_ACTION;
+            packet.hands[side].status_bits = DROIDDECK_XR_GRIP_ACTIVE;
+        }
+        stamp(now);
+    }
+    static void rotation(float *out, const Quat &q) {
+        out[0] = float(q.x); out[1] = float(q.y); out[2] = float(q.z); out[3] = float(q.w);
+    }
+    void head(const Quat &q, const Vec3 &p = {.4, 1.7, -.2}) {
+        tracking.head = {{}, {float(p.x), float(p.y), float(p.z)}, 15};
+        rotation(tracking.head.orientation, q);
+    }
+    void stamp(int64_t time) { now = time; packet.sample_monotonic_ns = tracking.sampled_ns = now; }
+    droiddeck::xr::JoyConHandControls controls(int side) const {
+        return droiddeck::xr::joyConHandControls(&tracking, packet, side, now);
+    }
+    DroidDeckXrPoseV2 update(int side) { return poses[side].update(controls(side), packet, skeleton, side, now); }
+    Vec3 anchor(int side, double yaw) const {
+        const double x = side ? .195 : -.195;
+        return {tracking.head.position[0] + std::cos(yaw)*x - std::sin(yaw)*.305,
+                tracking.head.position[1] - .5,
+                tracking.head.position[2] - std::sin(yaw)*x - std::cos(yaw)*.305};
+    }
+    void expect(const DroidDeckXrPoseV2 &pose, int side, const Vec3 &position, uint32_t flags = 7) const {
+        assert(pose.flags == flags);
+        assert(std::abs(pose.position[0] - position.x) < .00001);
+        assert(std::abs(pose.position[1] - position.y) < .00001);
+        assert(std::abs(pose.position[2] - position.z) < .00001);
+        for (int i = 0; i < 4; ++i) assert(pose.orientation[i] == tracking.hands[side].pose.orientation[i]);
+    }
+};
+
+static void testXrJoyConRestGeometry() {
+    const auto roll = [](double angle) { return Quat{std::cos(angle/2), 0, 0, std::sin(angle/2)}; };
+    for (int side = 0; side < 2; ++side) {
+        JoyConRestFixture f;
+        f.expect(f.update(side), side, f.anchor(side, 0));
+        for (double yaw : {-.8, 0., .8}) {
+            f.head(AboutY(yaw) * AboutX(.7) * roll(-.5), {1.2, 2.1, -.9});
+            f.expect(f.update(side), side, f.anchor(side, yaw));
+            JoyConRestFixture::rotation(f.tracking.hands[side].pose.orientation, AboutY(-1.1) * AboutX(-.6) * roll(.4));
+            f.expect(f.update(side), side, f.anchor(side, yaw));
+        }
+        for (double pitch : {-M_PI/2, M_PI/2}) {
+            f.head(AboutY(-1.2) * AboutX(pitch));
+            f.expect(f.update(side), side, f.anchor(side, .8));
+            f.poses[side].reset();
+            f.head(AboutY(.8) * AboutX(pitch));
+            f.expect(f.update(side), side, f.anchor(side, .8));
+        }
+        f.head(AboutY(-.3));
+        f.expect(f.update(side), side, f.anchor(side, -.3));
+    }
+    puts("PASS: resting controllers follow head translation/yaw, ignore pitch/roll and retain exact IMU aim");
+}
+
+static void testXrJoyConRestTransition() {
+    for (int side = 0; side < 2; ++side) {
+        JoyConRestFixture f;
+        auto &grip = f.packet.hands[side].grip;
+        const Vec3 observed{side ? .8 : -.8, 1.5, -1.2};
+        grip = {{float(observed.x), float(observed.y), float(observed.z)}, {}, 10};
+        f.expect(f.update(side), side, observed, 15);
+        const auto sampled = f.now;
+        grip.flags = 0;
+        f.head(AboutY(.7), {.9, 1.9, -.6});
+        JoyConRestFixture::rotation(f.tracking.hands[side].pose.orientation, AboutY(-.9) * AboutX(.4));
+        f.stamp(sampled + 200000000);
+        f.expect(f.update(side), side, observed);
+        f.stamp(sampled + 300000000);
+        f.expect(f.update(side), side, (observed + f.anchor(side, .7)) * .5);
+        f.stamp(sampled + 400000000);
+        f.expect(f.update(side), side, f.anchor(side, .7));
+        f.head(AboutY(-.4), {1.1, 2.2, -.1});
+        f.stamp(sampled + 500000000);
+        f.expect(f.update(side), side, f.anchor(side, -.4));
+        const Vec3 reacquired{side ? .2 : -.2, 1.8, -.4};
+        grip = {{float(reacquired.x), float(reacquired.y), float(reacquired.z)}, {}, 10};
+        f.expect(f.update(side), side, reacquired, 15);
+        grip.flags = 0;
+        f.stamp(sampled + 700000000);
+        f.expect(f.update(side), side, reacquired);
+        f.tracking.head.flags = 0;
+        f.stamp(f.now + 1);
+        assert(!droiddeck::xr::poseValid(f.update(side)));
+        f.head(AboutY(.8) * AboutX(M_PI/2));
+        f.expect(f.update(side), side, f.anchor(side, .8));
+    }
+    puts("PASS: optical position holds 200ms, blends for 200ms, reacquires immediately and needs a valid fallback head");
+}
+
+static void testXrJoyConRestSafety() {
+    using namespace droiddeck::xr;
+    for (int side = 0; side < 2; ++side) {
+        for (int reason = 0; reason < 6; ++reason) {
+            JoyConRestFixture f;
+            if (reason == 0) f.tracking.head.flags = 0;
+            if (reason == 1) f.tracking.head.flags = 3;
+            if (reason == 2) f.tracking.head.flags = 5;
+            if (reason == 3) f.tracking.head.position[0] = NAN;
+            if (reason == 4) f.tracking.head.orientation[0] = NAN;
+            if (reason == 5) f.tracking.head.orientation[3] = 2;
+            const auto controls = f.controls(side);
+            assert(controls.active && controls.head.flags == 0);
+            assert(!poseValid(f.update(side)));
+        }
+        for (int reason = 0; reason < 13; ++reason) {
+            JoyConRestFixture f;
+            f.head(AboutY(-.6));
+            f.packet.hands[side].grip = {{4, 5, 6}, {}, 10};
+            assert(f.update(side).flags == 15);
+            const auto savedTracking = f.tracking;
+            const auto savedPacket = f.packet;
+            f.packet.hands[side].grip.flags = 0;
+            switch (reason) {
+                case 0: f.packet.flags &= ~DROIDDECK_XR_INPUT_FOCUSED; break;
+                case 1: f.packet.flags &= ~DROIDDECK_XR_INPUT_HAND_MODE; break;
+                case 2: f.tracking.hands[side].active = 0; break;
+                case 3: f.tracking.hands[side].pose.flags = 0; break;
+                case 4: f.tracking.hands[side].pose.orientation[0] = NAN; break;
+                case 5: f.tracking.hands[side].pose.orientation[3] = 2; break;
+                case 6: f.packet.sample_monotonic_ns -= 100000001; break;
+                case 7: ++f.packet.sample_monotonic_ns; break;
+                case 8: f.packet.version = 0; break;
+                case 9: f.tracking.sampled_ns -= 100000001; break;
+                case 10: ++f.tracking.sampled_ns; break;
+                case 11: f.tracking.active = 0; break;
+                case 12: f.tracking.active = 1; break;
+            }
+            assert(!poseValid(f.update(side)));
+            f.packet = savedPacket; f.tracking = savedTracking;
+            f.packet.hands[side].grip.flags = 0;
+            f.head(AboutY(.8) * AboutX(M_PI/2));
+            f.expect(f.update(side), side, f.anchor(side, .8));
+        }
+        for (int reason = 0; reason < 4; ++reason) {
+            JoyConRestFixture f;
+            f.head(AboutY(-.6));
+            f.packet.hands[side].grip = {{4, 5, 6}, {}, 10};
+            assert(f.update(side).flags == 15);
+            f.packet.hands[side].grip.flags = 0;
+            f.head(AboutY(.8) * AboutX(-M_PI/2));
+            if (reason == 0) ++f.packet.origin_epoch;
+            if (reason == 1) ++f.packet.session_generation;
+            if (reason == 2) f.stamp(f.now - 1);
+            if (reason == 3) f.poses[side].reset();
+            f.expect(f.update(side), side, f.anchor(side, .8));
+        }
+        JoyConRestFixture f;
+        f.tracking.sampled_ns -= 100000000;
+        assert(f.controls(side).head.flags == 15);
+        --f.tracking.sampled_ns;
+        assert(!f.controls(side).active && f.controls(side).head.flags == 0);
+        assert(!joyConHandControls(nullptr, f.packet, side, f.now).active);
+    }
+    puts("PASS: invalid head/input/IMU cannot infer a controller and safety resets discard old position and heading");
+}
+
+static void testXrJoyConRestController() {
+    using namespace droiddeck::xr;
+    for (int side = 0; side < 2; ++side) {
+        Context context;
+        VR_CLEANUP_SERVER_DRIVER_CONTEXT(); VRDriverContext() = &context;
+        CardboardController controller(side == 1);
+        assert(controller.ConfigureAndroidXr() && controller.Activate(5) == VRInitError_None);
+        const auto initialSkeletonUpdates = context.input.skeletonUpdates;
+        JoyConRestFixture f;
+        f.packet.flags |= DROIDDECK_XR_INPUT_LOCAL_HAND_MESH;
+        auto &joy = f.tracking.hands[side];
+        joy.buttons = DROIDDECK_XR_MENU_CLICK | DROIDDECK_XR_PRIMARY_CLICK | DROIDDECK_XR_STICK_CLICK;
+        joy.stick[0] = .5f; joy.stick[1] = -.5f;
+        f.packet.hands[side].pinch = f.packet.hands[side].grasp = 1;
+        f.packet.hands[side].status_bits |= DROIDDECK_XR_PINCH_ACTIVE;
+        f.packet.hands[side].ready_bits = f.packet.hands[side].capability_bits = DROIDDECK_XR_PINCH | DROIDDECK_XR_GRASP;
+        const auto value = [&](const char *name) { return context.input.values.at(context.input.handles.at(name)); };
+        const auto update = [&] { controller.UpdateXrHand(f.packet, f.skeleton, f.now, false, false, f.controls(side)); };
+        const std::string model = side ? "{indexcontroller}valve_controller_knu_1_0_right" : "{indexcontroller}valve_controller_knu_1_0_left";
+        for (double yaw : {0., .8}) {
+            f.head(AboutY(yaw) * AboutX(.5), {.6, 1.9, -.8});
+            update(); update();
+            const auto pose = controller.GetPose();
+            assert(pose.poseIsValid && pose.deviceIsConnected && pose.result == TrackingResult_Running_OutOfRange);
+            assert(context.properties.strings.at({6, Prop_RenderModelName_String}) == model);
+            assert(context.input.skeletonUpdates == initialSkeletonUpdates);
+            assert(value("/input/a/click") == 1 && value("/input/system/click") == 1 && value("/input/thumbstick/click") == 1);
+            assert(value("/input/thumbstick/x") == .5f && value("/input/thumbstick/y") == -.5f);
+            assert(value("/input/trigger/value") == 0 && value("/input/grip/value") == 0);
+            DroidDeckXrPoseV2 raw{{float(pose.vecPosition[0]), float(pose.vecPosition[1]), float(pose.vecPosition[2])},
+                {float(pose.qRotation.x), float(pose.qRotation.y), float(pose.qRotation.z), float(pose.qRotation.w)}, 7};
+            const auto anchor = f.anchor(side, yaw);
+            DroidDeckXrPoseV2 expected{{float(anchor.x), float(anchor.y), float(anchor.z)}, {}, 7};
+            std::memcpy(expected.orientation, joy.pose.orientation, sizeof(expected.orientation));
+            HandTransform tip{};
+            std::memcpy(tip.m, context.input.poses.at(context.input.handles.at("/pose/tip")).m, sizeof(tip.m));
+            const auto worldTip = handCompose(handTransform(raw), tip), wanted = handTransform(expected);
+            for (int row = 0; row < 3; ++row)
+                for (int col = 0; col < 4; ++col) assert(std::abs(worldTip.m[row][col] - wanted.m[row][col]) < .00001);
+        }
+        joy.trigger = joy.squeeze = 1;
+        f.tracking.head.flags = 0;
+        update();
+        assert(!controller.GetPose().poseIsValid && value("/input/trigger/value") == 1 && value("/input/grip/value") == 1);
+        f.head({}); update();
+        assert(controller.GetPose().poseIsValid);
+        joy.active = 0; update();
+        assert(!controller.GetPose().poseIsValid && value("/input/trigger/value") == 0 && value("/input/system/click") == 0);
+        controller.Deactivate(); VR_CLEANUP_SERVER_DRIVER_CONTEXT();
+    }
+    puts("PASS: inferred controller keeps Index model, Joy-Con buttons and IMU aim without hand gesture takeover");
+}
+
 int main() {
     Context context;
     VRDriverContext() = &context;
@@ -1017,5 +1244,9 @@ int main() {
     testXrJoyConPositionContinuity();
     testXrJoyConAimParity();
     testXrJoyConUnknownTracking();
+    testXrJoyConRestGeometry();
+    testXrJoyConRestTransition();
+    testXrJoyConRestSafety();
+    testXrJoyConRestController();
     testJoyConInputParity();
 }
