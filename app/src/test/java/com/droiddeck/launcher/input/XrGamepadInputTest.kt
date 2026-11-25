@@ -17,6 +17,8 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.InputDeviceBuilder
+import org.robolectric.shadows.ShadowBuild
+import org.robolectric.util.ReflectionHelpers
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], manifest = Config.NONE, instrumentedPackages = ["com.droiddeck.launcher.input.FakeInputWriter"],
@@ -31,6 +33,7 @@ class XrGamepadInputTest {
     private val orientation = FakeMotion()
 
     @Before fun setup() {
+        hardware("XREAL", "Android XR Puck", "axrpuck")
         JoyConPadTest.RecordingWriter.pads.clear()
         val app = RuntimeEnvironment.getApplication()
         val manager = app.getSystemService(InputManager::class.java)
@@ -61,6 +64,103 @@ class XrGamepadInputTest {
         assertTrue(input.nativeMotion(device.id, InputDevice.SOURCE_JOYSTICK, MotionEvent.ACTION_MOVE,
             1L, 2L, floatArrayOf(.75f, -.5f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)))
         assertEquals(.75f, pad().leftX); assertEquals(-.5f, pad().leftY)
+    }
+
+    @Test fun otherHeadsetsKeepOrdinaryPairedJoyConButtonsSticksAndSystemKeys() {
+        val left = joyCon(101, JoyCon.LEFT, MotionEvent.AXIS_X, MotionEvent.AXIS_Y)
+        val right = joyCon(102, JoyCon.RIGHT, MotionEvent.AXIS_RX, MotionEvent.AXIS_RY)
+        for ((manufacturer, model, deviceName) in listOf(
+            Triple("Samsung", "Galaxy XR", "other-headset"),
+            Triple("Meta", "Quest 3", "eureka"),
+            Triple("XREAL", "Another headset", "axrpuck"),
+            Triple("Other", "Android XR Puck", "axrpuck"),
+            Triple("XREAL", "Android XR Puck", "other-device"),
+        )) {
+            ordinaryHardware(manufacturer, model, deviceName)
+            assertEquals(left.id, PadBridge.joyConForSlot(1, JoyCon.LEFT))
+            assertEquals(right.id, PadBridge.joyConForSlot(1, JoyCon.RIGHT))
+            assertTrue(joyKey(left, 0x220))
+            assertTrue(joyKey(right, 0x130))
+            assertTrue(joyKey(left, 0x138))
+            assertTrue(joyKey(left, 0x13a))
+            assertTrue(joyKey(right, 0x13b))
+            assertTrue(joyKey(right, 0x13c))
+            val pair = JoyConPadTest.RecordingWriter.pads[1]!!
+            assertTrue(pair.up)
+            assertTrue(pair.isDown(PadState.A))
+            assertTrue(pair.isDown(PadState.SELECT))
+            assertTrue(pair.isDown(PadState.START))
+            assertTrue(pair.isDown(PadState.GUIDE))
+            assertEquals(1f, pair.leftTrigger)
+            assertTrue(joyMotion(left, MotionEvent.AXIS_X to .75f, MotionEvent.AXIS_Y to -.5f))
+            assertTrue(joyMotion(right, MotionEvent.AXIS_RX to -.6f, MotionEvent.AXIS_RY to .4f))
+            val moved = JoyConPadTest.RecordingWriter.pads[1]!!
+            assertEquals(.75f, moved.leftX)
+            assertEquals(-.5f, moved.leftY)
+            assertEquals(-.6f, moved.rightX)
+            assertEquals(.4f, moved.rightY)
+            assertEquals(0, input.menuSequence)
+            assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.joyConState())
+            assertTrue(key(KeyEvent.KEYCODE_BUTTON_A))
+            assertTrue(pad().isDown(PadState.A))
+        }
+    }
+
+    @Test fun otherHeadsetDeviceChangesAndReconnectNeverClaimJoyConsOrTouchMotion() {
+        val left = joyCon(101, JoyCon.LEFT, MotionEvent.AXIS_X, MotionEvent.AXIS_Y)
+        val right = joyCon(102, JoyCon.RIGHT, MotionEvent.AXIS_RX, MotionEvent.AXIS_RY)
+        ordinaryHardware("Samsung", "Galaxy XR", "other-headset")
+        assertTrue(joyKey(right, 0x130))
+        input.onInputDeviceChanged(right.id)
+        assertFalse(JoyConPadTest.RecordingWriter.pads[1]!!.isDown(PadState.A))
+        bridge.syncConnectedControllers()
+        assertEquals(left.id, PadBridge.joyConForSlot(1, JoyCon.LEFT))
+        assertEquals(right.id, PadBridge.joyConForSlot(1, JoyCon.RIGHT))
+        assertTrue(joyKey(right, 0x130))
+        input.onInputDeviceRemoved(right.id)
+        assertFalse(JoyConPadTest.RecordingWriter.pads[1]!!.isDown(PadState.A))
+        input.onInputDeviceAdded(right.id)
+        input.pause()
+        input.resume()
+        bridge.syncConnectedControllers()
+        assertEquals(left.id, PadBridge.joyConForSlot(1, JoyCon.LEFT))
+        assertEquals(right.id, PadBridge.joyConForSlot(1, JoyCon.RIGHT))
+        assertTrue(joyKey(right, 0x131))
+        assertTrue(JoyConPadTest.RecordingWriter.pads[1]!!.isDown(PadState.B))
+        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.joyConState())
+    }
+
+    @Test fun otherHeadsetsKeepGenericGamepadDashboardControls() {
+        ordinaryHardware("Meta", "Quest 3", "eureka")
+        assertTrue(key(KeyEvent.KEYCODE_BUTTON_SELECT))
+        assertTrue(key(KeyEvent.KEYCODE_BUTTON_START))
+        assertEquals(1, input.menuSequence)
+        assertFalse(pad().isDown(PadState.SELECT))
+        assertFalse(pad().isDown(PadState.START))
+        key(KeyEvent.KEYCODE_BUTTON_SELECT, KeyEvent.ACTION_UP)
+        key(KeyEvent.KEYCODE_BUTTON_START, KeyEvent.ACTION_UP)
+        assertTrue(key(KeyEvent.KEYCODE_BUTTON_MODE))
+        assertEquals(2, input.menuSequence)
+    }
+
+    @Test fun defaultMotionSourceStaysUnstartedOutsideAura() {
+        input.close()
+        hardware("XREAL", "Another headset", "another-device")
+        val left = joyCon(101, JoyCon.LEFT)
+        input = XrGamepadInput(RuntimeEnvironment.getApplication()) { bridge }
+        input.resume()
+        input.focus(true)
+        input.onInputDeviceAdded(left.id)
+        input.onInputDeviceChanged(left.id)
+        assertTrue(joyKey(left, 0x220))
+        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.joyConState())
+        input.pause()
+        input.resume()
+        val source = ReflectionHelpers.getField<XrJoyConMotion>(input, "orientation")
+        assertEquals(XrJoyConOrientation(), source.snapshot(JoyCon.LEFT))
+        assertEquals(XrJoyConOrientation(), source.snapshot(JoyCon.RIGHT))
+        assertNull(ReflectionHelpers.getField<Any?>(source, "worker"))
+        assertNull(ReflectionHelpers.getField<Any?>(source, "thread"))
     }
 
     @Test fun menuChordReleasesGuestKeysAndFiresOnceUntilBothReleased() {
@@ -476,6 +576,27 @@ class XrGamepadInputTest {
     private fun controls(source: XrGamepadInput = input): IntArray {
         val state = source.joyConState()
         return intArrayOf(state[0], state[1], state[2], state[RIGHT], state[RIGHT + XrJoyConSnapshot.STICK_X], state[RIGHT + XrJoyConSnapshot.STICK_Y])
+    }
+
+    private fun hardware(manufacturer: String, model: String, device: String) {
+        ShadowBuild.setManufacturer(manufacturer)
+        ShadowBuild.setModel(model)
+        ShadowBuild.setDevice(device)
+    }
+
+    private fun ordinaryHardware(manufacturer: String, model: String, device: String) {
+        input.close()
+        hardware(manufacturer, model, device)
+        input = XrGamepadInput(RuntimeEnvironment.getApplication(), { now }, UnusedMotion()) { bridge }
+        input.resume()
+        input.focus(true)
+    }
+
+    private class UnusedMotion : XrJoyConMotionSource {
+        override fun devices(devices: Array<InputDevice?>): Unit = error("Non-AURA input used hybrid motion")
+        override fun snapshot(side: Int): XrJoyConOrientation = error("Non-AURA input read hybrid motion")
+        override fun recenter(side: Int): Unit = error("Non-AURA input recentered hybrid motion")
+        override fun close(): Unit = error("Non-AURA input owned hybrid motion")
     }
 
     private class FakeMotion : XrJoyConMotionSource {

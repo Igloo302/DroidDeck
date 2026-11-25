@@ -8,6 +8,7 @@ import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import com.droiddeck.launcher.xr.XrPlatform
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToInt
 
@@ -64,6 +65,7 @@ internal class XrGamepadInput(
     private val orientation: XrJoyConMotionSource = XrJoyConMotion(context, nowNs),
     private val bridge: () -> PadBridge?,
 ) : InputManager.InputDeviceListener {
+    private val auraJoyCons = XrPlatform.isAuraPuck()
     private val manager = context.getSystemService(InputManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
     private val menu = XrGamepadMenu()
@@ -100,12 +102,12 @@ internal class XrGamepadInput(
         resumed = false
         manager.unregisterInputDeviceListener(this)
         release()
-        orientation.devices(arrayOfNulls(2))
+        if (auraJoyCons) orientation.devices(arrayOfNulls(2))
         joyConBridge?.releaseXrJoyCons(this)
         joyConBridge = null
     }
 
-    @Synchronized fun close() { pause(); orientation.close() }
+    @Synchronized fun close() { pause(); if (auraJoyCons) orientation.close() }
 
     @Synchronized fun focus(active: Boolean) {
         if (focused == active) return
@@ -121,7 +123,7 @@ internal class XrGamepadInput(
 
     @Synchronized fun joyConState(): IntArray {
         val state = IntArray(XrJoyConSnapshot.SIZE)
-        if (!resumed || !focused) return state
+        if (!auraJoyCons || !resumed || !focused) return state
         val now = nowNs()
         for (side in joyCons.indices) {
             val hand = joyCons[side] ?: continue
@@ -147,7 +149,7 @@ internal class XrGamepadInput(
     }
 
     @Synchronized fun key(event: KeyEvent): Boolean {
-        val side = JoyCon.side(event.device)
+        val side = hybridSide(event.device)
         if (side >= 0) {
             if (!resumed || !focused) return true
             val hand = joyCon(event.deviceId, side) ?: return true
@@ -163,6 +165,7 @@ internal class XrGamepadInput(
         if (!isController(normalized.device) || !PadBridge.isControllerKeyEvent(normalized)) return false
         if (!resumed || !focused) return true
         val pad = bridge() ?: return true
+        if (JoyCon.side(normalized.device) >= 0) return pad.onKeyEvent(normalized)
         val result = menu.key(normalized.deviceId, normalized.keyCode, normalized.action, normalized.repeatCount)
         if (result.request) {
             // The first chord key may already be in the guest; release it before the VR menu pulse.
@@ -179,7 +182,7 @@ internal class XrGamepadInput(
 
     @Synchronized fun motion(event: MotionEvent): Boolean {
         val device = event.device
-        val side = JoyCon.side(device)
+        val side = hybridSide(device)
         if (side >= 0) {
             if (!resumed || !focused || !event.isFromSource(InputDevice.SOURCE_JOYSTICK) ||
                 event.actionMasked != MotionEvent.ACTION_MOVE) return true
@@ -214,25 +217,29 @@ internal class XrGamepadInput(
 
     private fun syncControllers() {
         val devices = manager.inputDeviceIds.map(manager::getInputDevice).filterNotNull()
-        for (side in joyCons.indices) {
-            val current = joyCons[side]
-            val found = devices.firstOrNull { it.id == current?.deviceId && JoyCon.side(it) == side }
-                ?: devices.firstOrNull { JoyCon.side(it) == side }
-            if (current?.deviceId != found?.id) joyCons[side] = found?.let { JoyConState(it.id, side) }
-        }
-        orientation.devices(Array(2) { side -> joyCons[side]?.deviceId?.let(manager::getInputDevice) })
         val pad = bridge()
-        if (joyConBridge !== pad) {
-            joyConBridge?.releaseXrJoyCons(this)
-            joyConBridge = pad
-            pad?.claimXrJoyCons(this)
+        if (auraJoyCons) {
+            for (side in joyCons.indices) {
+                val current = joyCons[side]
+                val found = devices.firstOrNull { it.id == current?.deviceId && hybridSide(it) == side }
+                    ?: devices.firstOrNull { hybridSide(it) == side }
+                if (current?.deviceId != found?.id) joyCons[side] = found?.let { JoyConState(it.id, side) }
+            }
+            orientation.devices(Array(2) { side -> joyCons[side]?.deviceId?.let(manager::getInputDevice) })
+            if (joyConBridge !== pad) {
+                joyConBridge?.releaseXrJoyCons(this)
+                joyConBridge = pad
+                pad?.claimXrJoyCons(this)
+            }
         }
         if (pad == null) return
         for (device in devices) {
-            if (!isController(device) || JoyCon.side(device) >= 0) pad.onDeviceRemoved(device.id)
+            if (!isController(device) || hybridSide(device) >= 0) pad.onDeviceRemoved(device.id)
         }
-        pad.syncConnectedControllers { isController(it) && JoyCon.side(it) < 0 }
+        pad.syncConnectedControllers { isController(it) && hybridSide(it) < 0 }
     }
+
+    private fun hybridSide(device: InputDevice?): Int = if (auraJoyCons) JoyCon.side(device) else -1
 
     private fun joyCon(deviceId: Int, side: Int): JoyConState? {
         if (joyCons[side]?.deviceId != deviceId) syncControllers()
@@ -240,6 +247,7 @@ internal class XrGamepadInput(
     }
 
     private fun removeJoyCon(deviceId: Int) {
+        if (!auraJoyCons) return
         for (side in joyCons.indices) if (joyCons[side]?.deviceId == deviceId) joyCons[side] = null
         orientation.devices(Array(2) { side -> joyCons[side]?.deviceId?.let(manager::getInputDevice) })
     }

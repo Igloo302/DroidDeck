@@ -42,6 +42,13 @@ Holding both runtime pinch values requests a system-button pulse after releasing
 
 ## Joy-Con heading stabilization
 
+The hybrid Joy-Con path is enabled only on the XREAL AURA Android XR puck, matching
+`Build.MANUFACTURER=XREAL`, `Build.MODEL=Android XR Puck` and `Build.DEVICE=axrpuck`
+(case-insensitively). Other devices retain ordinary Joy-Con gamepad routing. They do not
+claim Joy-Cons for XR, subscribe to their IMU sensors, or publish hybrid controller packets,
+so hand-based placement, stomach-level fallback, optical heading correction and Joy-Con
+controller visuals remain inactive there. This gate does not depend on attached USB glasses.
+
 In hybrid Joy-Con mode, the controller's IMU supplies aim and OpenXR hands supply position.
 To establish an optical heading reference, look forward, point the Joy-Con forward with the
 hand visible, and hold Capture (left) or Home (right) for 0.8 seconds. Keep the hand steady
