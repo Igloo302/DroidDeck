@@ -77,6 +77,7 @@ public:
         handModel_ = env_->GetMethodID(type, "onXrHandModel", "(I)[B");
         showHands_ = env_->GetMethodID(type, "onXrShowHands", "()Z");
         viewZoom_ = env_->GetMethodID(type, "onXrViewZoom", "()F");
+        back_ = env_->GetMethodID(type, "onXrBack", "(Z)Z");
         env_->DeleteLocalRef(type);
         checked();
     }
@@ -89,13 +90,16 @@ public:
         const auto result = env_->CallIntMethod(app_->activity->clazz, gamepadMenu_); checked();
         return uint32_t(result);
     }
-    JoyConSnapshot joyConState() {
+    JoyConSnapshot joyConState(bool &ready) {
         JoyConSnapshot values{};
+        ready = false;
         auto state = static_cast<jintArray>(env_->CallObjectMethod(app_->activity->clazz, joyConState_));
         checked();
         if (!state) return values;
-        if (env_->GetArrayLength(state) == values.size())
+        if (env_->GetArrayLength(state) == values.size()) {
             env_->GetIntArrayRegion(state, 0, values.size(), values.data());
+            ready = true;
+        }
         env_->DeleteLocalRef(state); checked();
         return values;
     }
@@ -114,6 +118,10 @@ public:
     }
     bool showHands() { const bool show = env_->CallBooleanMethod(app_->activity->clazz, showHands_); checked(); return show; }
     float viewZoom() { const float zoom = env_->CallFloatMethod(app_->activity->clazz, viewZoom_); checked(); return zoom; }
+    bool onBack(bool canceled) {
+        const bool handled = env_->CallBooleanMethod(app_->activity->clazz, back_, jboolean(canceled));
+        checked(); return handled;
+    }
     bool onInput(AInputEvent *event) {
         if (!gamepadKey_) return false;
         jboolean handled = false;
@@ -170,6 +178,7 @@ private:
     jmethodID gamepadKey_ = nullptr, gamepadMotion_ = nullptr, gamepadFocus_ = nullptr, gamepadMenu_ = nullptr;
     jmethodID handModel_ = nullptr, showHands_ = nullptr, joyConState_ = nullptr;
     jmethodID viewZoom_ = nullptr;
+    jmethodID back_ = nullptr;
     jmethodID active_ = nullptr, frame_ = nullptr, status_ = nullptr, error_ = nullptr;
 };
 }
@@ -455,6 +464,7 @@ private:
             }
             if (AInputEvent_getType(event) != AINPUT_EVENT_TYPE_KEY || AKeyEvent_getKeyCode(event) != AKEYCODE_BACK
                 || AKeyEvent_getAction(event) != AKEY_EVENT_ACTION_UP) return 0;
+            if (runtime->callbacks_->onBack((AKeyEvent_getFlags(event) & AKEY_EVENT_FLAG_CANCELED) != 0)) return 1;
             if (runtime->running_) {
                 XrResult result = xrRequestExitSession(runtime->session_);
                 if (XR_SUCCEEDED(result)) runtime->quitRequested_ = true;
@@ -713,7 +723,7 @@ private:
         skeletonFile_.write(skeleton_);
     }
 
-    void sampleHands(XrTime predicted, const JoyConSnapshot &joyCons) {
+    void sampleHands(XrTime predicted, const JoyConSnapshot &joyCons, bool joyConsReady) {
         handPacket_ = droiddeck_xr_input_v2_neutral(runtimeSession_.generation, runtimeSession_.originEpoch);
         const auto sampled = xr_monotonic_ns();
         opticalSampleNs_ = sampled;
@@ -779,7 +789,8 @@ private:
                 acquired |= poseValid(hand.grip) && (hand.status_bits & DROIDDECK_XR_GRIP_ACTIVE);
             const bool touchProfile = profiles_[0].find("touch_controller") != std::string::npos ||
                 profiles_[1].find("touch_controller") != std::string::npos;
-            const bool nextMode = handModeSelection_.update(inputPolicy_, acquired, touchProfile, joyCons);
+            const bool nextMode = joyConsReady
+                ? handModeSelection_.update(inputPolicy_, acquired, touchProfile, joyCons) : handMode_;
             if (nextMode != handMode_) {
                 handMode_ = nextMode;
                 handPacket_.hands[0] = {}; handPacket_.hands[1] = {};
@@ -986,7 +997,7 @@ private:
                 {pose.position.x, pose.position.y, pose.position.z}, (uint32_t)flags};
     }
 
-    void publishTracking(const XrView views[2], bool validViews, XrTime predicted, const JoyConSnapshot &joyCons) {
+    void publishTracking(const XrView views[2], bool validViews, XrTime predicted, const JoyConSnapshot &joyCons, bool joyConsReady) {
         if (!tracking_) return;
         const auto sampled = xr_monotonic_ns();
         DroidDeckXrTracking packet{};
@@ -1013,7 +1024,7 @@ private:
             }
             auto &orientation = joyConOrientations_[eye];
             const auto previousAlignments = orientation.alignmentCount();
-            joyConHands_[eye] = state_ == XR_SESSION_STATE_FOCUSED
+            joyConHands_[eye] = state_ == XR_SESSION_STATE_FOCUSED && joyConsReady
                 ? orientation.update(joyCons.data() + eye*kJoyConSnapshotStride,
                     packet.head, runtimeSession_.generation, runtimeSession_.originEpoch, optical, joyConNow)
                 : DroidDeckXrHand{};
@@ -1273,9 +1284,10 @@ private:
             check(xrSyncActions(session_, &sync), "xrSyncActions");
             if (frames_ % 30 == 0) updateProfiles();
         }
+        bool joyConsReady = true;
         const auto joyCons = inputPolicy_ != "controllers" && state_ == XR_SESSION_STATE_FOCUSED
-            ? callbacks_->joyConState() : JoyConSnapshot{};
-        sampleHands(frameState.predictedDisplayTime, joyCons);
+            ? callbacks_->joyConState(joyConsReady) : JoyConSnapshot{};
+        sampleHands(frameState.predictedDisplayTime, joyCons, joyConsReady);
         if (!handMode_ && state_ == XR_SESSION_STATE_FOCUSED && !neutralFrames_) {
             for (int hand = 0; hand < 2; hand++) {
                 XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO}; get.action = grip_; get.subactionPath = hands_[hand];
@@ -1319,7 +1331,7 @@ private:
             const auto &a = views[0].pose.position; const auto &b = views[1].pose.position;
             eyeSeparation_ = std::sqrt((a.x-b.x)*(a.x-b.x) + (a.y-b.y)*(a.y-b.y) + (a.z-b.z)*(a.z-b.z));
         }
-        publishTracking(views, validViews, frameState.predictedDisplayTime, handMode_ ? joyCons : JoyConSnapshot{});
+        publishTracking(views, validViews, frameState.predictedDisplayTime, handMode_ ? joyCons : JoyConSnapshot{}, joyConsReady);
         if (validViews && tracking_ && (state_ == XR_SESSION_STATE_VISIBLE || state_ == XR_SESSION_STATE_FOCUSED))
             attachGuest(true);
         if (guestAttached_ && callbacks_) callbacks_->onFrame(xr_monotonic_ns());

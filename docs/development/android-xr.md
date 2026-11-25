@@ -49,6 +49,11 @@ claim Joy-Cons for XR, subscribe to their IMU sensors, or publish hybrid control
 so hand-based placement, stomach-level fallback, optical heading correction and Joy-Con
 controller visuals remain inactive there. This gate does not depend on attached USB glasses.
 
+On AURA, Android Back opens the existing DroidDeck session menu. Closing the menu returns
+to the immersive view. The AURA activity has a separate task so opening the menu does not
+destroy the native XR session or its Joy-Con orientation state. Other Android XR devices
+retain their existing Back behavior.
+
 The puck has an AURA pane in Smart glasses settings. **SteamVR view zoom** defaults to
 100% and can magnify the view up to 300%. It applies the same per-eye visual zoom to the
 guest image and locally rendered gloves without changing SteamVR resolution settings or

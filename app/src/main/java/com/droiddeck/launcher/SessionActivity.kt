@@ -149,6 +149,8 @@ import com.droiddeck.launcher.ui.BottomPageActions
 import com.droiddeck.launcher.ui.DroidDeckTheme
 import com.droiddeck.launcher.wayland.CompositorHost
 import com.droiddeck.launcher.wayland.WaylandCompositor
+import com.droiddeck.launcher.xr.AuraXrMenu
+import com.droiddeck.launcher.xr.AuraXrMenuReturn
 import java.io.File
 import com.droiddeck.launcher.session.ComponentsManager
 import com.droiddeck.launcher.session.LatestRequestCoordinator
@@ -524,6 +526,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
     private val drawerShortcutKeysDown = mutableSetOf<Pair<Int, Int>>()
 
     private var drawerOpenState by mutableStateOf(false)
+    private val auraXrMenuReturn = AuraXrMenuReturn()
     private var typingReturnMode: SecondScreenMode? = null
     private var drawerDocked by mutableStateOf(false)
     private var drawerPinned by mutableStateOf(false)
@@ -684,8 +687,8 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
     private var drawerTextureLodBias by mutableStateOf<String?>(null)
     private var lossless by mutableStateOf(Lossless.State.NONE)
     private val xrHandPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-        if (com.droiddeck.launcher.xr.AndroidXrEntry.readiness(this).canProbe)
-            startActivity(android.content.Intent(this, AndroidXrActivity::class.java))
+        if (!auraXrMenuReturn.isPending() && com.droiddeck.launcher.xr.AndroidXrEntry.readiness(this).canProbe)
+            startActivity(AndroidXrActivity.launchIntent(this))
     }
     private val pickLossless = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         if (r.resultCode == RESULT_OK) InAppFilePicker.pickedFile(r.data)?.let { importLossless(it) }
@@ -831,6 +834,13 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (intent.action == AuraXrMenu.ACTION_OPEN && AuraXrMenu.requestedSession(intent) == null) {
+            runtimeRemovalBlocked = true
+            closeAtOnce = true
+            finish()
+            return
+        }
+        auraXrMenuReturn.restore(savedInstanceState)
         AgentGuest.readyListener = agentReadyListener
         com.droiddeck.launcher.agent.AgentAttachments.gameFrame = gameFrame
         if (com.droiddeck.launcher.runtime.LinuxRuntimeInstaller.isRemoving() ||
@@ -1117,16 +1127,74 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
                 if (pipUi) return
                 when {
                     ::loading.isInitialized && loading.ended -> finish()
-                    inputSettingsOpen -> inputSettingsOpen = false
+                    inputSettingsOpen -> closeInputSettings()
+                    gestureSettingsOpen -> closeGestureSettings()
                     dockedTouchOnly -> routeBackAction()
-                    drawerOpen -> drawerOpen = false
+                    drawerOpen -> closeSessionMenu()
                     achievementsOpen -> closeAchievements()
-                    pcKeyboardOpen -> pcKeyboardOpen = false
+                    pcKeyboardOpen -> closePcKeyboard()
+                    auraXrMenuReturn.isPending() -> reopenAuraSessionMenu()
                     else -> routeBackAction()
                 }
             }
         })
         watchSession()
+        handleAuraXrMenuIntent(intent)
+    }
+
+    private fun handleAuraXrMenuIntent(incoming: Intent?) {
+        if (incoming == null) return
+        if (!auraXrMenuReturn.open(incoming)) return
+        AuraXrMenu.consume(incoming)
+        steamVrAutoTried = true
+        releasePads()
+        drawerOpen = true
+    }
+
+    private fun closeSessionMenu() {
+        drawerOpen = false
+        val returnToXr = auraXrMenuReturn.takeReturnIntent(this) ?: return
+        releasePads()
+        startActivity(returnToXr)
+    }
+
+    private fun backgroundSession() {
+        val fromAuraMenu = auraXrMenuReturn.isPending()
+        auraXrMenuReturn.cancel()
+        drawerOpen = false
+        pip.background()
+        if (fromAuraMenu) startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        else moveTaskToBack(true)
+    }
+
+    private fun toggleSessionMenu() {
+        if (drawerOpen) closeSessionMenu() else drawerOpen = true
+    }
+
+    private fun reopenAuraSessionMenu() {
+        if (auraXrMenuReturn.isPending()) drawerOpen = true
+    }
+
+    private fun closeInputSettings() {
+        inputSettingsOpen = false
+        secondScreenPresentation?.refreshControls()
+        reopenAuraSessionMenu()
+    }
+
+    private fun closeGestureSettings() {
+        gestureSettingsOpen = false
+        reopenAuraSessionMenu()
+    }
+
+    private fun closePcKeyboard() {
+        pcKeyboardOpen = false
+        reopenAuraSessionMenu()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        auraXrMenuReturn.save(outState)
+        super.onSaveInstanceState(outState)
     }
 
     private fun createSessionOverlay(): ComposeView = ComposeView(this).apply {
@@ -1326,7 +1394,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
                 }
                 com.droiddeck.launcher.ui.GestureFeedback(recognizedGesture)
                 if (inputSettingsOpen) com.droiddeck.launcher.ui.InputSettingsDialog(
-                    onBack = { inputSettingsOpen = false; secondScreenPresentation?.refreshControls() },
+                    onBack = ::closeInputSettings,
                     onChanged = {
                         controllerSettings = ControllerPrefs.read(this@SessionActivity)
                         oscMode = SessionPrefs.oscMode(this@SessionActivity, SessionState.mode == SessionService.MODE_STEAM)
@@ -1366,8 +1434,8 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
                 ) { com.droiddeck.launcher.ui.WowChatPanel(wowChat) }
                 if (gestureSettingsOpen) com.droiddeck.launcher.ui.TouchGestureDialog(
                     game = gestureGame,
-                    onDismiss = { gestureSettingsOpen = false },
-                    onSaved = { gestureSettingsOpen = false; refreshGestureConfig() },
+                    onDismiss = ::closeGestureSettings,
+                    onSaved = { closeGestureSettings(); refreshGestureConfig() },
                 )
                 androidx.compose.runtime.LaunchedEffect(drawerOpen, menuOwnsController) {
                     if (drawerOpen) {
@@ -1406,7 +1474,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
                             .onFailure { Log.w(TAG, "achievements in front: ${it.javaClass.simpleName}") }.getOrNull()
                     }
                     achievementsInFront = found
-                    if (found == null) achievementsOpen = false
+                    if (found == null && achievementsOpen) closeAchievements()
                 }
                 androidx.compose.runtime.LaunchedEffect(pcKeyboardOpen) { if (pcKeyboardOpen) releasePads(); updateOnScreenControls() }
                 LaunchedEffect(pcKeyboardOpen, drawerOpen, achievementsOpen) {
@@ -1415,7 +1483,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
                 if (pcKeyboardOpen) com.droiddeck.launcher.ui.PcKeyboard(
                     sendKey = { code, down -> if (CompositorHost.isStarted) sendGuestKey(code, down, 32) },
                     onAndroidKeyboard = { pcKeyboardOpen = false; togglePrimaryKeyboard() },
-                    onClose = { pcKeyboardOpen = false },
+                    onClose = ::closePcKeyboard,
                 )
                 if (!drawerDocked) SessionMenu(
                     docked = false,
@@ -1926,10 +1994,11 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
             },
             unfoldedControlsWithController = unfoldedControlsWithController,
             onUnfoldedControlsWithController = ::chooseUnfoldedControlsWithController,
-            onBackground = { drawerOpen = false; pip.background(); moveTaskToBack(true) },
+            onBackground = ::backgroundSession,
             onShareLogs = { drawerOpen = false; shareCurrentSessionLogs() },
-            onStop = { drawerOpen = false; SessionService.stop(this@SessionActivity); finish() },
+            onStop = { auraXrMenuReturn.cancel(); drawerOpen = false; SessionService.stop(this@SessionActivity); finish() },
             onStopFrom = { onScreen ->
+                auraXrMenuReturn.cancel()
                 drawerOpen = false
                 if (onScreen == null || com.droiddeck.launcher.ui.Motion.scale == 0f || quitFrom != null) {
                     if (quitFrom == null) { SessionService.stop(this@SessionActivity); finish() }
@@ -1938,7 +2007,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
                     quitFrom = onScreen.translate(-at[0].toFloat(), -at[1].toFloat())
                 }
             },
-            onClose = { drawerOpen = false },
+            onClose = ::closeSessionMenu,
             onDismissScreen = if (docked) ({ selectSecondScreenMode(SecondScreenMode.NONE) }) else null,
             components = drawerComponents,
             onComponentsRefresh = {
@@ -1984,6 +2053,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
     private fun sendSteamGuide() {
         if (!dockedTouchOnly) drawerOpen = false
         padBridge?.triggerSteamMenu()
+        if (auraXrMenuReturn.isPending()) closeSessionMenu()
     }
 
     @androidx.compose.runtime.Composable
@@ -2031,9 +2101,13 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
     private fun triggerSteamQam() {
         if (!dockedTouchOnly) drawerOpen = false
         padBridge?.triggerQam()
+        if (auraXrMenuReturn.isPending()) closeSessionMenu()
     }
 
-    private fun closeAchievements() { achievementsOpen = false }
+    private fun closeAchievements() {
+        achievementsOpen = false
+        reopenAuraSessionMenu()
+    }
 
     private fun resolveAchievementsInFront(): AchievementsInFront? {
         if (!SessionState.running || SessionState.mode != SessionService.MODE_STEAM) return null
@@ -2085,6 +2159,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
         else if (fieldKeyboardImeShown) {
             fieldKeyboardImeShown = false
             fieldKeyboardOnPrimary = false
+            if (resumed) reopenAuraSessionMenu()
         }
         updateDesktopKeyboardButton()
     }
@@ -2118,7 +2193,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
     private fun performBackAction(double: Boolean) {
         val isSteam = SessionState.mode == SessionService.MODE_STEAM
         val opensQam = isSteam && (double xor backActionsInverted)
-        if (opensQam) triggerSteamQam() else if (!dockedTouchOnly) drawerOpen = !drawerOpen
+        if (opensQam) triggerSteamQam() else if (!dockedTouchOnly) toggleSessionMenu()
     }
 
     private fun handleHomeGuideIntent(incoming: Intent?) {
@@ -3384,6 +3459,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
     }
 
     private fun onSessionEnded(status: Int) {
+        auraXrMenuReturn.cancel()
         ended = true
         ++steamVrRequestGeneration
         if (isInPictureInPictureMode) {
@@ -3592,7 +3668,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
                     when (action) {
                         PhysicalShortcuts.Action.STEAM -> sendSteamGuide()
                         PhysicalShortcuts.Action.QAM -> triggerSteamQam()
-                        PhysicalShortcuts.Action.DROIDDECK -> if (!dockedTouchOnly) drawerOpen = !drawerOpen
+                        PhysicalShortcuts.Action.DROIDDECK -> if (!dockedTouchOnly) toggleSessionMenu()
                     }
                 }) return true
         }
@@ -3671,7 +3747,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
             if (fromController && (event.keyCode == KeyEvent.KEYCODE_BUTTON_L1 || event.keyCode == KeyEvent.KEYCODE_BUTTON_R1)) {
                 if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                     // The bumpers walk the tabs on the strip; a page kept inside More counts as the More tab.
-                    val pages = sessionDrawerPages(glasses.present)
+                    val pages = sessionDrawerPages(glasses.present || com.droiddeck.launcher.xr.XrPlatform.isAuraPuck())
                     drawerPage = pages.strip().step(pages.tabFor(drawerPage), if (event.keyCode == KeyEvent.KEYCODE_BUTTON_R1) 1 else -1)
                     releaseDrawerDirection()
                 }
@@ -3683,7 +3759,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
             }
             if (event.keyCode == KeyEvent.KEYCODE_BUTTON_B || event.keyCode == KeyEvent.KEYCODE_BACK) {
                 if (!handled && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                    if (drawerLayerOpen) drawerBackRequests++ else drawerOpen = false
+                    if (drawerLayerOpen) drawerBackRequests++ else closeSessionMenu()
                 }
                 releaseDrawerDirection()
             }
@@ -6022,6 +6098,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
+        if (intent.action == AuraXrMenu.ACTION_OPEN && AuraXrMenu.requestedSession(intent) == null) return
         if (intent.action == SessionService.ACTION_AGENT_START) {
             if (SessionState.running || SessionState.phase !in setOf(SessionPhase.IDLE, SessionPhase.FAILED)) {
                 Log.w(TAG, "ignoring agent start while session phase is ${SessionState.phase}")
@@ -6034,6 +6111,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
         if (this.intent.getBooleanExtra(EXTRA_RETURN_HOME, false)) intent.putExtra(EXTRA_RETURN_HOME, true)
         if (!intent.hasExtra(EXTRA_LINK_TASK)) intent.putExtra(EXTRA_LINK_TASK, this.intent.getIntExtra(EXTRA_LINK_TASK, -1))
         setIntent(intent)
+        handleAuraXrMenuIntent(intent)
         if (::pip.isInitialized) pip.refresh(true)
         if (intent.getBooleanExtra(EXTRA_STEAMVR, false) && SessionState.mode == SessionService.MODE_STEAM) {
             SessionState.steamVr = true
@@ -6113,6 +6191,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
         if (::pip.isInitialized) pip.resumed()
         if (CompositorHost.isStarted) applyFrameGen()
         SessionPrefs.sessionPrefs(this).registerOnSharedPreferenceChangeListener(cardboardPrefListener)
+        if (!inputSettingsOpen && !gestureSettingsOpen && !achievementsOpen && !pcKeyboardOpen) reopenAuraSessionMenu()
     }
 
     override fun onPause() {
@@ -6173,6 +6252,11 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
     }
 
     private fun steamVrAction(action: String) {
+        if (action == "stop") {
+            auraXrMenuReturn.cancel()
+            AndroidXrActivity.stopAuraSession(SessionState.sessionId)
+        }
+        if (action == "start") auraXrMenuReturn.cancel()
         if (action == "start" && com.droiddeck.launcher.session.QuestExperimental.isSupported()) {
             startActivity(android.content.Intent(this, QuestXrActivity::class.java))
             return
@@ -6183,7 +6267,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
                 val permission = "android.permission.HAND_TRACKING"
                 if (checkSelfPermission(permission) != android.content.pm.PackageManager.PERMISSION_GRANTED)
                     xrHandPermission.launch(permission)
-                else startActivity(android.content.Intent(this, AndroidXrActivity::class.java))
+                else startActivity(AndroidXrActivity.launchIntent(this))
             } else {
                 Log.i(TAG, "Android XR launch blocked: $readiness")
                 Toast.makeText(this, R.string.android_xr_not_ready, Toast.LENGTH_LONG).show()
@@ -6647,6 +6731,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
     }
 
     private fun autoStartSteamVr(now: SteamVr.Status) {
+        if (auraXrMenuReturn.isPending()) return
         if (now == SteamVr.Status.RUNNING) steamVrAutoTried = true
         val action = SteamVr.autoAction(now, SessionState.steamVr, loading.visible,
             SessionState.mode == SessionService.MODE_STEAM, steamVrAutoTried, steamVrInstallTried) ?: return

@@ -101,17 +101,20 @@ internal class XrGamepadInput(
         logDevices()
     }
 
-    @Synchronized fun pause() {
+    @Synchronized fun pause(retainOrientation: Boolean = false) {
         if (!resumed) return
         resumed = false
         manager.unregisterInputDeviceListener(this)
         release()
-        if (auraJoyCons) orientation.devices(arrayOfNulls(2))
+        if (auraJoyCons && !retainOrientation) orientation.devices(arrayOfNulls(2))
         joyConBridge?.releaseXrJoyCons(this)
         joyConBridge = null
     }
 
     @Synchronized fun close() { pause(); if (auraJoyCons) orientation.close() }
+
+    @Synchronized fun nativeJoyConState(): IntArray? =
+        if (auraJoyCons && (!resumed || !focused)) null else joyConState()
 
     @Synchronized fun focus(active: Boolean) {
         if (focused == active) return

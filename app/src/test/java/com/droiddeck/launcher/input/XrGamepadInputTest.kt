@@ -607,6 +607,53 @@ class XrGamepadInputTest {
         assertTrue(orientation.closed)
     }
 
+    @Test fun menuPausePreservesMotionButReleasesControlsAndPublishesNoInput() {
+        val right = joyCon(102, JoyCon.RIGHT)
+        input.onInputDeviceAdded(right.id)
+        orientation.samples[1] = XrJoyConOrientation(Quaternion.IDENTITY, now, 12, .25f, 3)
+        joyKey(right, 0x130)
+        assertTrue(input.joyConState()[RIGHT] and JoyCon.VR_A != 0)
+        input.pause(retainOrientation = true)
+        assertEquals(right.id, orientation.owned[1])
+        assertNull(input.nativeJoyConState())
+        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.joyConState())
+        input.focus(false)
+        input.resume()
+        assertNull(input.nativeJoyConState())
+        input.focus(true)
+        val returned = input.nativeJoyConState()!!
+        assertEquals(CONNECTED, returned[RIGHT])
+        assertEquals(12, returned[RIGHT_EPOCH])
+        assertEquals(3, returned[RIGHT + XrJoyConSnapshot.RECENTER_SEQUENCE])
+        input.pause()
+        assertNull(orientation.owned[1])
+        assertTrue(orientation.samples[1].epoch > 12)
+    }
+
+    @Test fun lifecycleNotReadyIsDifferentFromReadyWithoutConnectedJoyCons() {
+        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.nativeJoyConState())
+        input.focus(false)
+        assertNull(input.nativeJoyConState())
+        input.pause(retainOrientation = true)
+        input.focus(true)
+        assertNull(input.nativeJoyConState())
+        input.resume()
+        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.nativeJoyConState())
+        ordinaryHardware("Samsung", "Galaxy XR", "other-headset")
+        input.pause(retainOrientation = true)
+        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.nativeJoyConState())
+    }
+
+    @Test fun closingFromMenuStillClosesTheRetainedMotionCollector() {
+        val right = joyCon(102, JoyCon.RIGHT)
+        input.onInputDeviceAdded(right.id)
+        input.pause(retainOrientation = true)
+        assertEquals(right.id, orientation.owned[1])
+        input.close()
+        assertTrue(orientation.closed)
+        assertNull(input.nativeJoyConState())
+    }
+
     private fun controls(source: XrGamepadInput = input): IntArray {
         val state = source.joyConState()
         return intArrayOf(state[0], state[1], state[2], state[RIGHT], state[RIGHT + XrJoyConSnapshot.STICK_X], state[RIGHT + XrJoyConSnapshot.STICK_Y])
