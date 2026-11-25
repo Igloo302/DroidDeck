@@ -341,8 +341,8 @@ internal fun TiltedWall(
 @Composable
 private fun rememberCapsuleArt(model: Any, size: Size, radius: Float): Painter {
     val context = LocalContext.current
-    val w = size.width.roundToInt()
-    val h = size.height.roundToInt()
+    val w = size.width.roundToInt().coerceAtLeast(1)
+    val h = size.height.roundToInt().coerceAtLeast(1)
     return rememberAsyncImagePainter(
         remember(model, w, h, radius) {
             ImageRequest.Builder(context).data(model).size(w, h).scale(Scale.FILL)

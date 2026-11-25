@@ -91,7 +91,14 @@ internal class XrGamepadInput(
     private var joyConBridge: PadBridge? = null
     private var resumed = false
     private var focused = false
+    private var menuOpen = false
     val menuSequence: Int get() = sequence.get()
+
+    @Synchronized fun setMenuOpen(open: Boolean) {
+        if (!auraJoyCons || menuOpen == open) return
+        menuOpen = open
+        release()
+    }
 
     @Synchronized fun resume() {
         if (resumed) return
@@ -101,12 +108,12 @@ internal class XrGamepadInput(
         logDevices()
     }
 
-    @Synchronized fun pause(retainOrientation: Boolean = false) {
+    @Synchronized fun pause() {
         if (!resumed) return
         resumed = false
         manager.unregisterInputDeviceListener(this)
         release()
-        if (auraJoyCons && !retainOrientation) orientation.devices(arrayOfNulls(2))
+        if (auraJoyCons) orientation.devices(arrayOfNulls(2))
         joyConBridge?.releaseXrJoyCons(this)
         joyConBridge = null
     }
@@ -174,6 +181,7 @@ internal class XrGamepadInput(
         val normalized = JoyCon.normalize(event)
         if (!isController(normalized.device) || !PadBridge.isControllerKeyEvent(normalized)) return false
         if (!resumed || !focused) return true
+        if (menuOpen) return true
         val pad = bridge() ?: return true
         if (JoyCon.side(normalized.device) >= 0) return pad.onKeyEvent(normalized)
         val result = menu.key(normalized.deviceId, normalized.keyCode, normalized.action, normalized.repeatCount)
@@ -203,6 +211,7 @@ internal class XrGamepadInput(
         }
         if (!PadBridge.isControllerMotionEvent(event) || !isController(event.device)) return false
         if (!resumed || !focused) return true
+        if (menuOpen) return true
         return bridge()?.onMotionEvent(event) ?: true
     }
 
@@ -271,17 +280,22 @@ internal class XrGamepadInput(
     }
 
     fun nativeMotion(device: Int, source: Int, action: Int, downTime: Long, eventTime: Long, axes: FloatArray): Boolean {
-        if (axes.size != AXES.size) return false
-        val coords = MotionEvent.PointerCoords().apply {
-            for (i in AXES.indices) setAxisValue(AXES[i], axes[i])
-        }
-        val event = MotionEvent.obtain(downTime, eventTime, action, 1,
-            arrayOf(MotionEvent.PointerProperties().apply { id = 0 }), arrayOf(coords),
-            0, 0, 1f, 1f, device, 0, source, 0)
+        val event = nativeMotionEvent(device, source, action, downTime, eventTime, axes) ?: return false
         return try { motion(event) } finally { event.recycle() }
     }
 
     companion object {
+        internal fun nativeMotionEvent(device: Int, source: Int, action: Int, downTime: Long,
+                                       eventTime: Long, axes: FloatArray): MotionEvent? {
+            if (axes.size != AXES.size) return null
+            val coords = MotionEvent.PointerCoords().apply {
+                for (i in AXES.indices) setAxisValue(AXES[i], axes[i])
+            }
+            return MotionEvent.obtain(downTime, eventTime, action, 1,
+                arrayOf(MotionEvent.PointerProperties().apply { id = 0 }), arrayOf(coords),
+                0, 0, 1f, 1f, device, 0, source, 0)
+        }
+
         internal const val JOYCON_CONNECTED = 1 shl 6
         private fun stickValue(value: Float): Int =
             if (value.isFinite()) (value.coerceIn(-1f, 1f) * 32767).roundToInt() else 0

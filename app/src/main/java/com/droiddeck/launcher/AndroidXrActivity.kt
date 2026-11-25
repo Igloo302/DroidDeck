@@ -9,9 +9,11 @@ import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import android.view.KeyEvent
+import android.view.Surface
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import com.droiddeck.launcher.input.XrGamepadInput
+import com.droiddeck.launcher.input.JoyCon
 import com.droiddeck.launcher.gpu.SteamVr
 import com.droiddeck.launcher.session.SessionService
 import com.droiddeck.launcher.session.SessionState
@@ -19,7 +21,7 @@ import com.droiddeck.launcher.wayland.CompositorHost
 import com.droiddeck.launcher.wayland.WaylandCompositor
 import com.droiddeck.launcher.xr.SteamVrHandVisuals
 import com.droiddeck.launcher.xr.AuraXrSettings
-import com.droiddeck.launcher.xr.AuraXrMenu
+import com.droiddeck.launcher.xr.AuraXrMenuPresentation
 import com.droiddeck.launcher.xr.XrPlatform
 import com.droiddeck.launcher.session.SessionPrefs
 import java.io.File
@@ -33,7 +35,11 @@ open class AndroidXrActivity : NativeActivity() {
     @Volatile private var xrVisible = false
     @Volatile private var steamVrStatus = SteamVr.Status.UNAVAILABLE
     private var sessionId: String? = null
-    private val openingMenu = AtomicBoolean()
+    private val menuRequested = AtomicBoolean()
+    private val menuLock = Any()
+    @Volatile private var menuPresentation: AuraXrMenuPresentation? = null
+    @Volatile private var menuRevision = 0
+    private var menuPending = false
     private var unregisterBack: (() -> Unit)? = null
     private val auraMenu: Boolean get() = this is AuraXrActivity && XrPlatform.isAuraPuck()
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,12 +58,12 @@ open class AndroidXrActivity : NativeActivity() {
 
     override fun onResume() {
         super.onResume()
-        openingMenu.set(false)
         gamepad.resume()
     }
 
     override fun onPause() {
-        gamepad.pause(retainOrientation = auraMenu && openingMenu.get())
+        onXrMenuClosed()
+        gamepad.pause()
         super.onPause()
     }
 
@@ -69,21 +75,70 @@ open class AndroidXrActivity : NativeActivity() {
     fun onXrBack(canceled: Boolean = false): Boolean {
         if (!auraMenu) return false
         if (canceled) return true
-        val capturedSession = sessionId ?: return false
         if (closing || !sessionAlive()) return false
-        if (!openingMenu.compareAndSet(false, true)) return true
         runOnUiThread {
-            if (closing || isFinishing || isDestroyed || !sessionAlive()) {
-                openingMenu.set(false)
-                return@runOnUiThread
+            if (closing || isFinishing || isDestroyed || !sessionAlive()) return@runOnUiThread
+            if (menuRequested.get()) {
+                val presentation = menuPresentation
+                if (presentation != null) presentation.back() else onXrMenuClosed()
             }
-            runCatching { startActivity(AuraXrMenu.openIntent(this, capturedSession)) }
-                .onFailure {
-                    openingMenu.set(false)
-                    Log.e("DroidDeckXR", "Could not open the DroidDeck menu", it)
-                }
+            else {
+                gamepad.setMenuOpen(true)
+                menuRequested.set(true)
+            }
         }
         return true
+    }
+
+    fun onXrMenuSupported(): Boolean = auraMenu
+    fun onXrMenuRequested(): Boolean = auraMenu && menuRequested.get() && !closing && sessionAlive()
+
+    fun onXrMenuSurface(surface: Surface?, width: Int, height: Int): Boolean {
+        if (surface == null) {
+            val previous = synchronized(menuLock) {
+                menuRevision++
+                menuPending = false
+                menuPresentation.also {
+                    if (it != null && !it.detachSurface()) return false
+                    menuPresentation = null
+                }
+            }
+            if (previous != null) runOnUiThread { previous.close() }
+            return true
+        }
+        if (!onXrMenuRequested()) return false
+        val revision = synchronized(menuLock) {
+            if (menuPresentation != null) return true
+            if (menuPending) return false
+            menuPending = true
+            menuRevision
+        }
+        runOnUiThread {
+            synchronized(menuLock) {
+                if (revision != menuRevision || !onXrMenuRequested()) return@synchronized
+                menuPresentation = runCatching {
+                    SessionActivity.openAuraMenu(this, surface, width, height) {
+                        if (revision == menuRevision) onXrMenuClosed()
+                    }
+                }.onFailure { Log.e("DroidDeckXR", "Could not create the immersive menu", it) }.getOrNull()
+                menuPending = false
+                if (menuPresentation == null) onXrMenuClosed()
+            }
+        }
+        return false
+    }
+
+    fun onXrMenuClosed() {
+        menuRequested.set(false)
+        onXrMenuSurface(null, 0, 0)
+        gamepad.setMenuOpen(false)
+    }
+
+    fun onXrMenuPointer(action: Int, x: Float, y: Float) {
+        val target = menuPresentation ?: return
+        runOnUiThread {
+            if (menuPresentation === target && menuRequested.get()) target.dispatchPointer(action, x, y)
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -92,12 +147,36 @@ open class AndroidXrActivity : NativeActivity() {
     }
 
     fun onXrGamepadKey(device: Int, source: Int, action: Int, code: Int, scan: Int,
-                       repeat: Int, meta: Int, flags: Int, downTime: Long, eventTime: Long): Boolean =
-        gamepad.key(KeyEvent(downTime, eventTime, action, code, repeat, meta, device, scan, flags, source))
+                       repeat: Int, meta: Int, flags: Int, downTime: Long, eventTime: Long): Boolean {
+        val event = KeyEvent(downTime, eventTime, action, code, repeat, meta, device, scan, flags, source)
+        if (!menuRequested.get()) return gamepad.key(event)
+        if (code == KeyEvent.KEYCODE_BACK && JoyCon.side(event.device) < 0) return false
+        gamepad.key(event)
+        val key = JoyCon.normalize(event)
+        val trigger = JoyCon.vrButton(JoyCon.side(event.device), scan) == JoyCon.VR_TRIGGER
+        val target = menuPresentation
+        if (!trigger && target != null) runOnUiThread {
+            if (menuPresentation === target && menuRequested.get()) target.dispatchKey(key)
+        }
+        return true
+    }
 
     fun onXrGamepadMotion(device: Int, source: Int, action: Int, downTime: Long,
-                          eventTime: Long, axes: FloatArray): Boolean =
-        gamepad.nativeMotion(device, source, action, downTime, eventTime, axes)
+                          eventTime: Long, axes: FloatArray): Boolean {
+        val event = XrGamepadInput.nativeMotionEvent(device, source, action, downTime, eventTime, axes) ?: return false
+        val handled = gamepad.motion(event)
+        val target = menuPresentation
+        if (menuRequested.get() && target != null) {
+            runOnUiThread {
+                try {
+                    if (menuPresentation === target && menuRequested.get()) target.dispatchMotion(event)
+                } finally { event.recycle() }
+            }
+            return true
+        }
+        event.recycle()
+        return handled
+    }
 
     fun onXrActive(active: Boolean) {
         xrVisible = active
@@ -198,6 +277,7 @@ open class AndroidXrActivity : NativeActivity() {
 
     override fun onDestroy() {
         closing = true
+        onXrMenuClosed()
         if (auraActivity.get() === this) auraActivity.clear()
         unregisterBack?.invoke()
         unregisterBack = null

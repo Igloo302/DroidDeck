@@ -187,6 +187,86 @@ class XrGamepadInputTest {
         key(KeyEvent.KEYCODE_BUTTON_MODE); assertEquals(2, input.menuSequence)
     }
 
+    @Test fun menuTransitionsReleaseJoyConControlsWithoutResettingOrientation() {
+        val right = joyCon(102, JoyCon.RIGHT, MotionEvent.AXIS_RX, MotionEvent.AXIS_RY)
+        input.onInputDeviceAdded(right.id)
+        orientation.samples[1] = XrJoyConOrientation(Quaternion(.5f, -.5f, .5f, -.5f), now, 12, .25f, 3)
+        val motion = input.joyConState().copyOfRange(RIGHT + XrJoyConSnapshot.QUATERNION_X, XrJoyConSnapshot.SIZE)
+        joyKey(right, 0x130)
+        joyKey(right, 0x13c)
+        joyMotion(right, MotionEvent.AXIS_RX to 1f)
+        input.setMenuOpen(true)
+        assertArrayEquals(intArrayOf(0, 0, 0, CONNECTED, 0, 0), controls())
+        assertEquals(right.id, orientation.owned[1])
+        assertArrayEquals(motion, input.nativeJoyConState()!!.copyOfRange(RIGHT + XrJoyConSnapshot.QUATERNION_X, XrJoyConSnapshot.SIZE))
+
+        assertTrue(joyKey(right, 0x130))
+        assertTrue(joyMotion(right, MotionEvent.AXIS_RY to -1f))
+        assertArrayEquals(intArrayOf(0, 0, 0, CONNECTED or JoyCon.VR_A, 0, 32767), controls())
+        input.setMenuOpen(true)
+        assertEquals(CONNECTED or JoyCon.VR_A, controls()[3])
+        joyKey(right, 0x13c)
+        input.setMenuOpen(false)
+        assertArrayEquals(intArrayOf(0, 0, 0, CONNECTED, 0, 0), controls())
+        assertArrayEquals(motion, input.nativeJoyConState()!!.copyOfRange(RIGHT + XrJoyConSnapshot.QUATERNION_X, XrJoyConSnapshot.SIZE))
+        joyKey(right, 0x130, KeyEvent.ACTION_UP)
+        joyKey(right, 0x130, repeat = 1)
+        joyKey(right, 0x13c, KeyEvent.ACTION_UP)
+        now += JoyConControls.SYSTEM_HOLD_MS * 1_000_000L
+        assertEquals(CONNECTED, controls()[3])
+        assertEquals(12, input.joyConState()[RIGHT_EPOCH])
+        assertEquals(3, input.joyConState()[RIGHT_RECENTER])
+        assertFalse(orientation.closed)
+        assertTrue(joyKey(right, 0x130))
+        assertEquals(CONNECTED or JoyCon.VR_A, controls()[3])
+    }
+
+    @Test fun menuCaptureReleasesAndBlocksGenericGamepadUntilClosed() {
+        assertTrue(key(KeyEvent.KEYCODE_BUTTON_A))
+        assertTrue(joyMotion(device, MotionEvent.AXIS_X to .75f, MotionEvent.AXIS_Y to -.5f))
+        assertTrue(pad().isDown(PadState.A))
+        assertEquals(.75f, pad().leftX)
+        input.setMenuOpen(true)
+        assertFalse(pad().isDown(PadState.A))
+        assertEquals(0f, pad().leftX)
+        assertEquals(0f, pad().leftY)
+        assertTrue(key(KeyEvent.KEYCODE_BUTTON_B))
+        assertTrue(joyMotion(device, MotionEvent.AXIS_X to -1f, MotionEvent.AXIS_Y to 1f))
+        assertFalse(pad().isDown(PadState.B))
+        assertEquals(0f, pad().leftX)
+        assertEquals(0f, pad().leftY)
+        input.setMenuOpen(false)
+        assertFalse(pad().isDown(PadState.A))
+        assertFalse(pad().isDown(PadState.B))
+        assertTrue(key(KeyEvent.KEYCODE_BUTTON_B, KeyEvent.ACTION_UP))
+        assertFalse(pad().isDown(PadState.B))
+        assertTrue(key(KeyEvent.KEYCODE_BUTTON_A))
+        assertTrue(joyMotion(device, MotionEvent.AXIS_X to -.75f))
+        assertTrue(pad().isDown(PadState.A))
+        assertEquals(-.75f, pad().leftX)
+    }
+
+    @Test fun menuCaptureIsIgnoredOutsideAuraIncludingHeldOrdinaryJoyCons() {
+        val right = joyCon(102, JoyCon.RIGHT, MotionEvent.AXIS_RX, MotionEvent.AXIS_RY)
+        ordinaryHardware("Samsung", "Galaxy XR", "other-headset")
+        assertTrue(key(KeyEvent.KEYCODE_BUTTON_A))
+        assertTrue(joyKey(right, 0x130))
+        assertTrue(joyMotion(right, MotionEvent.AXIS_RX to .75f))
+        for (open in listOf(true, false)) {
+            input.setMenuOpen(open)
+            assertTrue(pad().isDown(PadState.A))
+            val pair = JoyConPadTest.RecordingWriter.pads[1]!!
+            assertTrue(pair.isDown(PadState.A))
+            assertEquals(.75f, pair.rightX)
+            assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.joyConState())
+        }
+        input.setMenuOpen(true)
+        assertTrue(key(KeyEvent.KEYCODE_BUTTON_B))
+        assertTrue(pad().isDown(PadState.B))
+        assertTrue(joyMotion(device, MotionEvent.AXIS_X to -.5f))
+        assertEquals(-.5f, pad().leftX)
+    }
+
     @Test fun focusLossPauseAndDisconnectReleaseHeldInput() {
         key(KeyEvent.KEYCODE_BUTTON_A); input.focus(false); assertFalse(pad().isDown(PadState.A))
         assertTrue(key(KeyEvent.KEYCODE_BACK)); assertFalse(pad().isDown(PadState.SELECT))
@@ -607,47 +687,24 @@ class XrGamepadInputTest {
         assertTrue(orientation.closed)
     }
 
-    @Test fun menuPausePreservesMotionButReleasesControlsAndPublishesNoInput() {
-        val right = joyCon(102, JoyCon.RIGHT)
-        input.onInputDeviceAdded(right.id)
-        orientation.samples[1] = XrJoyConOrientation(Quaternion.IDENTITY, now, 12, .25f, 3)
-        joyKey(right, 0x130)
-        assertTrue(input.joyConState()[RIGHT] and JoyCon.VR_A != 0)
-        input.pause(retainOrientation = true)
-        assertEquals(right.id, orientation.owned[1])
-        assertNull(input.nativeJoyConState())
-        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.joyConState())
-        input.focus(false)
-        input.resume()
-        assertNull(input.nativeJoyConState())
-        input.focus(true)
-        val returned = input.nativeJoyConState()!!
-        assertEquals(CONNECTED, returned[RIGHT])
-        assertEquals(12, returned[RIGHT_EPOCH])
-        assertEquals(3, returned[RIGHT + XrJoyConSnapshot.RECENTER_SEQUENCE])
-        input.pause()
-        assertNull(orientation.owned[1])
-        assertTrue(orientation.samples[1].epoch > 12)
-    }
-
     @Test fun lifecycleNotReadyIsDifferentFromReadyWithoutConnectedJoyCons() {
         assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.nativeJoyConState())
         input.focus(false)
         assertNull(input.nativeJoyConState())
-        input.pause(retainOrientation = true)
+        input.pause()
         input.focus(true)
         assertNull(input.nativeJoyConState())
         input.resume()
         assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.nativeJoyConState())
         ordinaryHardware("Samsung", "Galaxy XR", "other-headset")
-        input.pause(retainOrientation = true)
+        input.pause()
         assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.nativeJoyConState())
     }
 
-    @Test fun closingFromMenuStillClosesTheRetainedMotionCollector() {
+    @Test fun closingWhileMenuOpenClosesTheMotionCollector() {
         val right = joyCon(102, JoyCon.RIGHT)
         input.onInputDeviceAdded(right.id)
-        input.pause(retainOrientation = true)
+        input.setMenuOpen(true)
         assertEquals(right.id, orientation.owned[1])
         input.close()
         assertTrue(orientation.closed)
