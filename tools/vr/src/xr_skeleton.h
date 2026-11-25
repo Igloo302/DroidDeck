@@ -48,6 +48,7 @@ inline DroidDeckXrPoseV2 joyConHandPose(const JoyConHandControls &controls, cons
     if (std::abs(length - 1.f) > .01f) return pose;
     std::memcpy(pose.orientation, controls.pose.orientation, sizeof(pose.orientation));
     pose.flags = 5u;
+    if (!controls.opticalPosition) return pose;
     const auto positionValid = [](const DroidDeckXrPoseV2 &candidate) {
         if (!(candidate.flags & DROIDDECK_XR_POSITION_VALID)) return false;
         for (float value : candidate.position) if (!std::isfinite(value)) return false;
@@ -74,19 +75,49 @@ inline DroidDeckXrPoseV2 joyConHandPose(const JoyConHandControls &controls, cons
 
 class JoyConHandPose {
 public:
-    void reset() { sampled_ = lastNow_ = 0; headingSet_ = false; }
+    void reset() {
+        sampled_ = lastNow_ = previousImuSample_ = 0;
+        angularSpeed_ = 0;
+        headingSet_ = false;
+        for (auto &arm : arms_) arm.Reset();
+    }
 
     DroidDeckXrPoseV2 update(const JoyConHandControls &controls, const DroidDeckXrInputV2 &input,
             const DroidDeckXrSkeleton &skeleton, int hand, int64_t now) {
-        if (generation_ != input.session_generation || epoch_ != input.origin_epoch || now < lastNow_) reset();
+        if (generation_ != input.session_generation || epoch_ != input.origin_epoch || now < lastNow_
+                || opticalPosition_ != controls.opticalPosition || hand_ != hand
+                || (!controls.opticalPosition && controls.sampledNs > 0 && controls.sampledNs < previousImuSample_)
+                || (!controls.opticalPosition && lastNow_ && now - lastNow_ > 100000000LL)) reset();
         generation_ = input.session_generation;
         epoch_ = input.origin_epoch;
+        opticalPosition_ = controls.opticalPosition;
+        hand_ = hand;
+        const auto previousNow = lastNow_;
         lastNow_ = now;
         int64_t sampled = 0;
         auto pose = joyConHandPose(controls, input, skeleton, hand, now, &sampled);
         if ((pose.flags & 5u) != 5u) { reset(); return {}; }
         const auto &head = controls.head;
         const bool haveHead = XrTrackingFile::Tracked(head);
+        if (!controls.opticalPosition) {
+            if (!haveHead) { reset(); return {}; }
+            const Quat imu = Normalize({pose.orientation[3], pose.orientation[0], pose.orientation[1], pose.orientation[2]});
+            const double elapsed = previousNow ? double(now - previousNow) * 1e-9 : 0;
+            const auto sampled = controls.sampledNs > 0 ? controls.sampledNs : now;
+            if (sampled != previousImuSample_) {
+                const double sampleElapsed = previousImuSample_ ? double(sampled - previousImuSample_) * 1e-9 : 0;
+                angularSpeed_ = sampleElapsed > 0
+                    ? AngleDegrees(Conjugate(previousImu_) * imu) * M_PI / 180. / sampleElapsed : 0;
+                previousImu_ = imu;
+                previousImuSample_ = sampled;
+            }
+            const auto position = arms_[hand].Update({head.position[0], head.position[1], head.position[2]},
+                {head.orientation[3], head.orientation[0], head.orientation[1], head.orientation[2]}, imu,
+                angularSpeed_, std::clamp(elapsed, 0., .1));
+            pose.position[0] = float(position.x); pose.position[1] = float(position.y); pose.position[2] = float(position.z);
+            pose.flags |= DROIDDECK_XR_POSITION_VALID;
+            return pose;
+        }
         if (haveHead) {
             const Quat rotation{head.orientation[3], head.orientation[0], head.orientation[1], head.orientation[2]};
             if (headingSet_) Heading(rotation, &heading_);
@@ -117,6 +148,12 @@ private:
     float position_[3]{};
     double heading_ = 0;
     bool headingSet_ = false;
+    bool opticalPosition_ = false;
+    int hand_ = -1;
+    ArmModel arms_[2]{ArmModel(false), ArmModel(true)};
+    Quat previousImu_;
+    int64_t previousImuSample_ = 0;
+    double angularSpeed_ = 0;
     int64_t sampled_ = 0, lastNow_ = 0;
     uint64_t generation_ = 0, epoch_ = 0;
 };

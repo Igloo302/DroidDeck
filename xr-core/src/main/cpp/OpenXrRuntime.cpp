@@ -252,9 +252,12 @@ public:
             const auto &correction = orientation.correction();
             const auto sample = orientation.sampleTimeNs();
             std::fprintf(file,
-                "%s{\"status\":\"%s\",\"calibrated\":%s,\"errorDegrees\":%g,\"correctionDegrees\":%g,"
+                "%s{\"status\":\"%s\",\"joyCon6Dof\":%s,\"cameraGuidedCalibration\":%s,\"calibrated\":%s,\"errorDegrees\":%g,\"correctionDegrees\":%g,"
                 "\"sampleAgeMs\":%g,\"epoch\":%d,\"recenterSequence\":%d,\"alignments\":%llu,\"alignmentReason\":\"%s\"}",
-                hand ? "," : "", correction.statusName(), correction.calibrated() ? "true" : "false",
+                hand ? "," : "", correction.statusName(),
+                joyConHands_[hand].active && orientation.opticalPositionEnabled() ? "true" : "false",
+                joyConHands_[hand].active && orientation.opticalHeadingEnabled() ? "true" : "false",
+                correction.calibrated() ? "true" : "false",
                 finite(correction.errorRadians() * 180. / M_PI), finite(correction.correctionRadians() * 180. / M_PI),
                 sample > 0 && now >= sample ? double(now - sample) * 1e-6 : -1.,
                 orientation.epoch(), orientation.recenterSequence(), (unsigned long long)orientation.alignmentCount(),
@@ -282,6 +285,7 @@ private:
     bool floorKnown_ = false, jointPermission_ = false;
     bool handExtension_ = false, jointTrackingExtension_ = false, jointAimExtension_ = false, localFloorExtension_ = false;
     bool handMode_ = false, handDataSourceExtension_ = false;
+    XrHandMode handModeSelection_;
     HandGloveRenderer handVisuals_;
     int64_t handModelAttempt_ = 0, handVisibilityAt_ = 0;
     bool showHandVisuals_ = false;
@@ -704,7 +708,7 @@ private:
         skeletonFile_.write(skeleton_);
     }
 
-    void sampleHands(XrTime predicted) {
+    void sampleHands(XrTime predicted, const JoyConSnapshot &joyCons) {
         handPacket_ = droiddeck_xr_input_v2_neutral(runtimeSession_.generation, runtimeSession_.originEpoch);
         const auto sampled = xr_monotonic_ns();
         opticalSampleNs_ = sampled;
@@ -770,7 +774,7 @@ private:
                 acquired |= poseValid(hand.grip) && (hand.status_bits & DROIDDECK_XR_GRIP_ACTIVE);
             const bool touchProfile = profiles_[0].find("touch_controller") != std::string::npos ||
                 profiles_[1].find("touch_controller") != std::string::npos;
-            const bool nextMode = inputPolicy_ == "hands" || (inputPolicy_ == "auto" && (acquired || (handMode_ && !touchProfile)));
+            const bool nextMode = handModeSelection_.update(inputPolicy_, acquired, touchProfile, joyCons);
             if (nextMode != handMode_) {
                 handMode_ = nextMode;
                 handPacket_.hands[0] = {}; handPacket_.hands[1] = {};
@@ -977,7 +981,7 @@ private:
                 {pose.position.x, pose.position.y, pose.position.z}, (uint32_t)flags};
     }
 
-    void publishTracking(const XrView views[2], bool validViews, XrTime predicted) {
+    void publishTracking(const XrView views[2], bool validViews, XrTime predicted, const JoyConSnapshot &joyCons) {
         if (!tracking_) return;
         const auto sampled = xr_monotonic_ns();
         DroidDeckXrTracking packet{};
@@ -993,12 +997,11 @@ private:
         }
         packet.period_ns = period_;
         packet.head = posePacket(head_.pose, head_.locationFlags);
-        const auto joyCons = handMode_ && state_ == XR_SESSION_STATE_FOCUSED
-            ? callbacks_->joyConState() : JoyConSnapshot{};
         const auto joyConNow = xr_monotonic_ns();
         for (int eye = 0; eye < 2; eye++) {
             JoyConOpticalReference optical;
-            if (skeleton_.active[eye] && skeleton_.session_generation == runtimeSession_.generation &&
+            if (joyConOpticalHeadingEnabled(joyCons[eye*kJoyConSnapshotStride]) &&
+                    skeleton_.active[eye] && skeleton_.session_generation == runtimeSession_.generation &&
                     skeleton_.origin_epoch == runtimeSession_.originEpoch) {
                 optical = {skeleton_.joints[eye][XR_HAND_JOINT_PALM_EXT],
                     skeleton_.joints[eye][XR_HAND_JOINT_WRIST_EXT], opticalSampleNs_};
@@ -1262,7 +1265,9 @@ private:
             check(xrSyncActions(session_, &sync), "xrSyncActions");
             if (frames_ % 30 == 0) updateProfiles();
         }
-        sampleHands(frameState.predictedDisplayTime);
+        const auto joyCons = inputPolicy_ != "controllers" && state_ == XR_SESSION_STATE_FOCUSED
+            ? callbacks_->joyConState() : JoyConSnapshot{};
+        sampleHands(frameState.predictedDisplayTime, joyCons);
         if (!handMode_ && state_ == XR_SESSION_STATE_FOCUSED && !neutralFrames_) {
             for (int hand = 0; hand < 2; hand++) {
                 XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO}; get.action = grip_; get.subactionPath = hands_[hand];
@@ -1306,7 +1311,7 @@ private:
             const auto &a = views[0].pose.position; const auto &b = views[1].pose.position;
             eyeSeparation_ = std::sqrt((a.x-b.x)*(a.x-b.x) + (a.y-b.y)*(a.y-b.y) + (a.z-b.z)*(a.z-b.z));
         }
-        publishTracking(views, validViews, frameState.predictedDisplayTime);
+        publishTracking(views, validViews, frameState.predictedDisplayTime, handMode_ ? joyCons : JoyConSnapshot{});
         if (validViews && tracking_ && (state_ == XR_SESSION_STATE_VISIBLE || state_ == XR_SESSION_STATE_FOCUSED))
             attachGuest(true);
         if (guestAttached_ && callbacks_) callbacks_->onFrame(xr_monotonic_ns());

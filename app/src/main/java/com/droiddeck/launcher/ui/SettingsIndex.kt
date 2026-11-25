@@ -39,6 +39,7 @@ internal class SettingsEntry(
     val words: List<String> = emptyList(),
     val developer: Boolean = false,
     val tab: String? = null,
+    val auraOnly: Boolean = false,
 ) {
     val within: Int? get() = section?.title ?: tab?.let { railLabelIcon(it).first } ?: group
 
@@ -96,6 +97,10 @@ internal object SettingsIndex {
         SettingsEntry(SettingsPlace.TAB, R.string.rail_decky, tab = "decky", words = listOf("plugins", "plugin store", "homebrew", "loader")),
         SettingsEntry(SettingsPlace.TAB, R.string.rail_boot_movies, tab = "boot-movies", words = listOf("startup movie", "boot video", "animation", "steamdeckrepo")),
         s(SettingsSection.GLASSES, R.string.setup_tab_glasses, "xreal", "viture", "vr", "ar"),
+        SettingsEntry(SettingsPlace.SETTINGS, R.string.aura_joycon_6dof, section = SettingsSection.GLASSES,
+            words = listOf("aura", "joy-con", "6dof", "tracking", "experimental"), auraOnly = true),
+        SettingsEntry(SettingsPlace.SETTINGS, R.string.aura_camera_calibration, section = SettingsSection.GLASSES,
+            words = listOf("aura", "joy-con", "camera", "calibration", "recenter"), auraOnly = true),
 
         s(SettingsSection.LAUNCHER, R.string.setup_theme, "color", "dark"),
         s(SettingsSection.LAUNCHER, R.string.setup_app_scale, "size", "zoom"),
@@ -150,5 +155,6 @@ internal object SettingsIndex {
     )
 
     fun search(context: Context, query: String): List<SettingsEntry> =
-        entries.filter { (!it.developer || DeveloperTools.on) && it.matches(context, query) }
+        entries.filter { (!it.developer || DeveloperTools.on) &&
+            (!it.auraOnly || com.droiddeck.launcher.xr.XrPlatform.isAuraPuck()) && it.matches(context, query) }
 }

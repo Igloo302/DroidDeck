@@ -14,6 +14,7 @@
 #define DROIDDECK_XR_PRIMARY_TOUCH (1u << 6)
 #define DROIDDECK_XR_SECONDARY_TOUCH (1u << 7)
 #define DROIDDECK_XR_THUMBREST_TOUCH (1u << 8)
+#define DROIDDECK_XR_JOYCON_6DOF (1u << 9)
 
 struct DroidDeckXrPose {
     float orientation[4];

@@ -75,6 +75,7 @@ internal fun rememberGlasses(): Pair<GlassesState, GlassesSettings> {
 }
 
 internal object GlassesTab {
+    const val AURA = "aura"
     const val DISPLAY = "display"
     const val VR = "vr"
     const val HARDWARE = "hardware"
@@ -109,7 +110,8 @@ internal fun VrControllerGroups(host: MenuHost, track: (String) -> Modifier = { 
 }
 
 @Composable
-internal fun glassesTabs(g: GlassesState): List<Pair<String, String>> = buildList {
+internal fun glassesTabs(g: GlassesState): List<Pair<String, String>> = if (com.droiddeck.launcher.xr.XrPlatform.isAuraPuck())
+    listOf(GlassesTab.AURA to stringResource(R.string.aura_settings_title)) else buildList {
     add(GlassesTab.DISPLAY to stringResource(R.string.glasses_display))
     if (g.canControl || g.hasDisplay) add(GlassesTab.VR to stringResource(R.string.glasses_vr))
     if (g.canControl) {
@@ -131,6 +133,10 @@ internal fun GlassesGroups(
     tab: String? = null,
     steamVr: @Composable () -> Unit = {},
 ) {
+    if (com.droiddeck.launcher.xr.XrPlatform.isAuraPuck()) {
+        AuraXrSettingsPanel(host, track)
+        return
+    }
     val display = tab == null || tab == GlassesTab.DISPLAY
     val vr = tab == null || tab == GlassesTab.VR
     val picture = GlassesRendering.picture(s, g.sbs, steamVrRunning)

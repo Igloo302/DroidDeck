@@ -28,7 +28,8 @@ static void expectRotation(const DroidDeckXrHand &hand, const Quat &expected) {
 static void testOpticalRecenterLifecycle() {
     constexpr int64_t step = 20000000;
     int64_t now = (int64_t(7) << 32) + 1000000000;
-    int32_t values[kJoyConSnapshotStride]{(1 << 6) | DROIDDECK_JOYCON_TRIGGER};
+    int32_t values[kJoyConSnapshotStride]{(1 << 6) | DROIDDECK_JOYCON_TRIGGER |
+        kJoyConPositionalTracking | kJoyConOpticalHeading};
     const Quat palm = AboutY(.4) * AboutX(-.5);
     JoyConOpticalReference optical;
     optical.palm = {{.3f, 1.2f, -.4f}, {float(palm.x), float(palm.y), float(palm.z), float(palm.w)}, 15};
@@ -88,7 +89,7 @@ static void testOpticalRecenterLifecycle() {
     calibrate();
     values[0] = 0;
     assert(!tracker.update(values, headPose({}), session, origin, optical, now).active);
-    values[0] = (1 << 6) | DROIDDECK_JOYCON_TRIGGER;
+    values[0] = (1 << 6) | DROIDDECK_JOYCON_TRIGGER | kJoyConPositionalTracking | kJoyConOpticalHeading;
     for (int i = 0; i < 30; ++i) expectRotation(update(), {});
     assert(!tracker.correction().calibrated());
     calibrate();
@@ -97,8 +98,92 @@ static void testOpticalRecenterLifecycle() {
     assert(!hand.pose.flags && hand.trigger == 1 && !tracker.correction().calibrated());
 }
 
+static void testOpticalSettings() {
+    int64_t now = 1000000000;
+    int32_t values[kJoyConSnapshotStride]{(1 << 6) | DROIDDECK_JOYCON_TRIGGER};
+    JoyConXrOrientation tracker;
+    JoyConOpticalReference optical;
+    optical.palm = optical.wrist = {{.3f, 1.2f, -.4f}, {0, 0, 0, 1}, 15};
+    const auto update = [&](const Quat &imu = Quat{}, const Quat &head = Quat{}) {
+        now += 20000000;
+        values[9] = int32_t(uint32_t(now)); values[10] = int32_t(uint64_t(now) >> 32);
+        rotation(values, imu); optical.sampledNs = now;
+        return tracker.update(values, headPose(head), 1, 1, optical, now);
+    };
+    expectRotation(update(), {});
+    for (int32_t flags : {0, kJoyConOpticalHeading, kJoyConPositionalTracking}) {
+        values[0] = (1 << 6) | DROIDDECK_JOYCON_TRIGGER | flags;
+        ++values[8]; ++values[12];
+        for (int i = 0; i < 40; ++i) {
+            const auto hand = update(AboutY(.2), AboutY(.4));
+            expectRotation(hand, AboutY(.4));
+            assert(hand.trigger == 1);
+            assert(bool(hand.buttons & DROIDDECK_XR_JOYCON_6DOF) == bool(flags & kJoyConPositionalTracking));
+        }
+        assert(!tracker.opticalHeadingEnabled() && !tracker.correction().calibrated());
+        assert(tracker.opticalPositionEnabled() == bool(flags & kJoyConPositionalTracking));
+    }
+    values[0] |= kJoyConOpticalHeading;
+    for (int i = 0; i < 40; ++i) update();
+    assert(tracker.opticalHeadingEnabled() && !tracker.correction().calibrated());
+    const auto calibrate = [&] {
+        ++values[8]; ++values[12];
+        for (int i = 0; i < 30; ++i) expectRotation(update(), {});
+        assert(tracker.correction().calibrated());
+    };
+    calibrate();
+    for (int i = 0; i < 40; ++i) update(AboutY(.1));
+    assert(tracker.headingOffset() < 0);
+    for (int32_t disable : {kJoyConOpticalHeading, kJoyConPositionalTracking}) {
+        const double heading = tracker.headingOffset();
+        values[0] &= ~disable;
+        for (int i = 0; i < 40; ++i) {
+            expectRotation(update(AboutY(.1)), AboutY(heading) * AboutY(.1));
+            assert(!tracker.correction().calibrated() && !tracker.opticalHeadingEnabled());
+        }
+        values[0] |= disable;
+        for (int i = 0; i < 40; ++i) update();
+        assert(!tracker.correction().calibrated() && tracker.opticalHeadingEnabled());
+        calibrate();
+    }
+    values[0] = kJoyConPositionalTracking | kJoyConOpticalHeading;
+    assert(!update().active);
+    assert(!tracker.opticalPositionEnabled() && !tracker.opticalHeadingEnabled());
+    assert(!tracker.correction().calibrated());
+}
+
+static void testHandModeWithoutOpticalTracking() {
+    for (int side = 0; side < 2; ++side) {
+        XrHandMode mode;
+        JoyConSnapshot snapshot{};
+        assert(!mode.update("auto", false, false, snapshot));
+        snapshot[side*kJoyConSnapshotStride] = 1 << 6;
+        assert(mode.update("auto", false, false, snapshot));
+        assert(mode.update("auto", false, true, snapshot));
+        assert(!mode.update("controllers", false, false, snapshot));
+        assert(mode.update("auto", false, false, snapshot));
+        snapshot = {};
+        assert(!mode.update("auto", false, false, snapshot));
+        assert(mode.update("hands", false, true, snapshot));
+    }
+    XrHandMode mode;
+    JoyConSnapshot snapshot{};
+    assert(mode.update("auto", true, false, snapshot));
+    assert(mode.update("auto", false, false, snapshot));
+    snapshot[0] = 1 << 6;
+    assert(mode.update("auto", false, false, snapshot));
+    snapshot = {};
+    assert(mode.update("auto", false, false, snapshot));
+    assert(!mode.update("auto", false, true, snapshot));
+    assert(!mode.update("auto", false, false, snapshot));
+    snapshot[0] = kJoyConPositionalTracking | kJoyConOpticalHeading;
+    assert(!mode.update("auto", false, false, snapshot));
+}
+
 int main() {
     testOpticalRecenterLifecycle();
+    testOpticalSettings();
+    testHandModeWithoutOpticalTracking();
     int32_t values[3]{(1 << 6) | DROIDDECK_JOYCON_TRIGGER | DROIDDECK_JOYCON_GRIP |
         DROIDDECK_JOYCON_A | DROIDDECK_JOYCON_B | DROIDDECK_JOYCON_STICK | DROIDDECK_JOYCON_SYSTEM,
         -32767, 32767};

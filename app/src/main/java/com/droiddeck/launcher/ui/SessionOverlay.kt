@@ -413,7 +413,8 @@ class DrawerActions(
 @Composable
 internal fun SessionDrawer(open: Boolean, requestedPage: SessionDrawerPage, controllerActive: Boolean, onPageChange: (SessionDrawerPage) -> Unit, a: DrawerActions, docked: Boolean = false,
     backRequest: Int = 0, onLayerChange: (Boolean) -> Unit = {}) {
-    val pages = sessionDrawerPages(a.glassesPresent)
+    val hasGlassesSettings = a.glassesPresent || com.droiddeck.launcher.xr.XrPlatform.isAuraPuck()
+    val pages = sessionDrawerPages(hasGlassesSettings)
     val page = requestedPage.takeIf { it in pages } ?: pages.first()
     var managing by rememberSaveable { mutableStateOf(false) }
     var releaseSignal by remember { mutableStateOf(0) }
@@ -424,8 +425,8 @@ internal fun SessionDrawer(open: Boolean, requestedPage: SessionDrawerPage, cont
     val host = rememberMenuHost()
     val (glasses, glassesSettings) = rememberGlasses()
     val glassesPages = glassesTabs(glasses) + (GlassesTab.CONTROLLERS to stringResource(R.string.vr_controllers_tab))
-    var selectedGlassesTab by rememberSaveable { mutableStateOf(GlassesTab.DISPLAY) }
-    val glassesTab = selectedGlassesTab.takeIf { key -> glassesPages.any { it.first == key } } ?: GlassesTab.DISPLAY
+    var selectedGlassesTab by rememberSaveable { mutableStateOf(glassesPages.first().first) }
+    val glassesTab = selectedGlassesTab.takeIf { key -> glassesPages.any { it.first == key } } ?: glassesPages.first().first
     var androidAppsExpanded by rememberSaveable { mutableStateOf(false) }
     var advancedEffectsExpanded by rememberSaveable { mutableStateOf(false) }
     var appToChooseDisplay by remember { mutableStateOf<HomeApp.LaunchableApp?>(null) }
@@ -641,7 +642,7 @@ internal fun SessionDrawer(open: Boolean, requestedPage: SessionDrawerPage, cont
                 }
                 if (insideMore && !managing) DrawerMoreBack(stringResource(page.title), focus.track(page, "more-back")) { host.open = null; onPageChange(SessionDrawerPage.MORE) }
                 if (managing) ManageDrawerPages(
-                    offeredDrawerPages(a.glassesPresent),
+                    offeredDrawerPages(hasGlassesSettings),
                     Modifier.weight(1f).fillMaxWidth().padding(top = 8.dp, start = 14.dp, end = 14.dp),
                     releaseSignal,
                 ) { managing = false } else {

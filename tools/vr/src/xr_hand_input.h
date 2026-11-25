@@ -30,6 +30,8 @@ struct JoyConHandControls {
     XrTouchInput input;
     DroidDeckXrPose pose{};
     DroidDeckXrPose head{};
+    bool opticalPosition = false;
+    int64_t sampledNs = 0;
 };
 
 inline bool xrHandTrackingFresh(const DroidDeckXrTracking *tracking, int64_t now) {
@@ -49,7 +51,8 @@ inline JoyConHandControls joyConHandControls(const DroidDeckXrTracking *tracking
             || !(packet.flags & DROIDDECK_XR_INPUT_HAND_MODE)
             || tracking->hands[hand].active != DROIDDECK_XR_JOYCON_ACTIVE) return {};
     return {true, xr_touch_input(tracking->hands[hand], false), tracking->hands[hand].pose,
-            XrTrackingFile::Tracked(tracking->head) ? tracking->head : DroidDeckXrPose{}};
+            XrTrackingFile::Tracked(tracking->head) ? tracking->head : DroidDeckXrPose{},
+            (tracking->hands[hand].buttons & DROIDDECK_XR_JOYCON_6DOF) != 0, tracking->sampled_ns};
 }
 
 inline bool poseValid(const DroidDeckXrPoseV2 &pose) {

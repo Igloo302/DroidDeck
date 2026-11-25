@@ -48,6 +48,7 @@ object SettingsReset {
         InputProfiles.resetAll(context)
         context.getSharedPreferences("app-ui", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("frame_gen", Context.MODE_PRIVATE).edit().clear().commit()
+        if (!com.droiddeck.launcher.xr.AuraXrSettings.reset(context)) ok = false
         context.getSharedPreferences("steam_touch", Context.MODE_PRIVATE).edit()
             .apply { STEAM_TOUCH_KEYS.forEach { remove(it) } }.commit()
         DownloadSource.reset(context)

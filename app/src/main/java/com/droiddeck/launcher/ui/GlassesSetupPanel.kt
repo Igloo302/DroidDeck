@@ -15,19 +15,20 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.droiddeck.launcher.R
 import com.droiddeck.launcher.glasses.GlassesMenuMirror
+import com.droiddeck.launcher.xr.XrPlatform
 
 @Composable
 internal fun GlassesSetupPanel() {
     val (glasses, settings) = rememberGlasses()
     val host = rememberMenuHost()
     val tabs = glassesTabs(glasses)
-    var selectedTab by rememberSaveable { mutableStateOf(GlassesTab.DISPLAY) }
-    val tab = selectedTab.takeIf { selected -> tabs.any { it.first == selected } } ?: GlassesTab.DISPLAY
+    var selectedTab by rememberSaveable { mutableStateOf(tabs.first().first) }
+    val tab = selectedTab.takeIf { selected -> tabs.any { it.first == selected } } ?: tabs.first().first
     LaunchedEffect(tab, glasses.present, glasses.canControl, glasses.model) { host.open = null }
 
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Note(stringResource(R.string.setup_glasses_scope))
-        if (!glasses.present && !glasses.hasDisplay && !glasses.canControl) {
+        Note(stringResource(if (XrPlatform.isAuraPuck()) R.string.aura_settings_scope else R.string.setup_glasses_scope))
+        if (!XrPlatform.isAuraPuck() && !glasses.present && !glasses.hasDisplay && !glasses.canControl) {
             Note(stringResource(R.string.setup_glasses_connect))
         } else {
             SegmentedTabs(tabs, tab, modifier = Modifier.fillMaxWidth(),

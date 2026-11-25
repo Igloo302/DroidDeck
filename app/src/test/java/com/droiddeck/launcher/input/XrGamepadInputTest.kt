@@ -6,6 +6,7 @@ import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import com.droiddeck.launcher.glasses.Quaternion
+import com.droiddeck.launcher.xr.AuraXrSettings
 import java.nio.file.Files
 import org.junit.After
 import org.junit.Assert.*
@@ -36,6 +37,8 @@ class XrGamepadInputTest {
         hardware("XREAL", "Android XR Puck", "axrpuck")
         JoyConPadTest.RecordingWriter.pads.clear()
         val app = RuntimeEnvironment.getApplication()
+        AuraXrSettings.setJoyCon6Dof(app, false)
+        AuraXrSettings.setCameraGuidedCalibration(app, false)
         val manager = app.getSystemService(InputManager::class.java)
         device = InputDeviceBuilder.newBuilder().setId(91).setName("Xbox").setDescriptor("xr-xbox")
             .setExternal(true).setVendorId(0x045e).setProductId(0x0b13)
@@ -392,6 +395,37 @@ class XrGamepadInputTest {
         input.focus(true)
         assertTrue(joyKey(left, 0x138))
         assertEquals(CONNECTED or JoyCon.VR_TRIGGER, controls()[0])
+    }
+
+    @Test fun opticalSettingsDefaultOffAndChangeOnlyConnectedAuraSnapshotOptionsLive() {
+        val app = RuntimeEnvironment.getApplication()
+        val left = joyCon(101, JoyCon.LEFT)
+        input.onInputDeviceAdded(left.id)
+        assertTrue(joyKey(left, 0x138))
+        orientation.samples[0] = XrJoyConOrientation(Quaternion.IDENTITY, now, 7, .25f, 2)
+        val before = input.joyConState()
+        assertEquals(CONNECTED or JoyCon.VR_TRIGGER, before[0])
+        fun expectOptions(options: Int) {
+            val state = input.joyConState()
+            assertEquals(CONNECTED or JoyCon.VR_TRIGGER or options, state[0])
+            assertArrayEquals(before.copyOfRange(1, XrJoyConSnapshot.STRIDE), state.copyOfRange(1, XrJoyConSnapshot.STRIDE))
+            assertArrayEquals(IntArray(XrJoyConSnapshot.STRIDE), state.copyOfRange(RIGHT, state.size))
+        }
+        AuraXrSettings.setCameraGuidedCalibration(app, true)
+        expectOptions(0)
+        AuraXrSettings.setJoyCon6Dof(app, true)
+        expectOptions(XrJoyConSnapshot.POSITIONAL_TRACKING or XrJoyConSnapshot.OPTICAL_HEADING)
+        AuraXrSettings.setCameraGuidedCalibration(app, false)
+        expectOptions(XrJoyConSnapshot.POSITIONAL_TRACKING)
+        AuraXrSettings.setJoyCon6Dof(app, false)
+        expectOptions(0)
+        AuraXrSettings.setJoyCon6Dof(app, true)
+        expectOptions(XrJoyConSnapshot.POSITIONAL_TRACKING)
+        input.focus(false)
+        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.joyConState())
+        input.focus(true)
+        input.onInputDeviceRemoved(left.id)
+        assertArrayEquals(IntArray(XrJoyConSnapshot.SIZE), input.joyConState())
     }
 
     @Test fun orientationSnapshotUsesXyzwBitsAndIndependentPerHandEpochs() {

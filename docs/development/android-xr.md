@@ -40,17 +40,29 @@ The existing `scene-focus.json` controls local glove visibility: only a live Ste
 
 Holding both runtime pinch values requests a system-button pulse after releasing trigger/grip. Ordinary gamepads route through PadBridge; View/Select + Menu/Start requests the same pulse. A gamepad does not become a tracked hand, and applications must support gamepad navigation. Orientation, drag and menu recall still need hardware acceptance.
 
-## Joy-Con heading stabilization
+## AURA Joy-Con settings and heading stabilization
 
-The hybrid Joy-Con path is enabled only on the XREAL AURA Android XR puck, matching
+The Android XR Joy-Con path is enabled only on the XREAL AURA Android XR puck, matching
 `Build.MANUFACTURER=XREAL`, `Build.MODEL=Android XR Puck` and `Build.DEVICE=axrpuck`
 (case-insensitively). Other devices retain ordinary Joy-Con gamepad routing. They do not
 claim Joy-Cons for XR, subscribe to their IMU sensors, or publish hybrid controller packets,
 so hand-based placement, stomach-level fallback, optical heading correction and Joy-Con
 controller visuals remain inactive there. This gate does not depend on attached USB glasses.
 
-In hybrid Joy-Con mode, the controller's IMU supplies aim and OpenXR hands supply position.
-To establish an optical heading reference, look forward, point the Joy-Con forward with the
+The puck has an AURA pane in Smart glasses settings. **Experimental Joy-Con 6DoF** and
+**Camera-guided calibration** both default to off, including upgrades without saved choices.
+With 6DoF off, Joy-Con buttons and IMU aim remain active, and the existing arm model supplies
+inferred controller placement relative to the head. Optical hand poses and remembered optical
+positions do not influence the controllers. Ordinary hand tracking remains available when
+Joy-Cons are disconnected.
+
+With experimental 6DoF on, the controller's IMU supplies aim and OpenXR hands supply position,
+with the existing stomach-level fallback when hands are lost. Camera-guided calibration is
+a separate opt-in and only takes effect while 6DoF is on. Disabling camera assistance clears
+the learned optical reference; enabling it again requires another manual recenter to calibrate.
+Manual recenter remains available in either mode, without requiring visible hands.
+
+With both options enabled, look forward, point the Joy-Con forward with the
 hand visible, and hold Capture (left) or Home (right) for 0.8 seconds. Keep the hand steady
 for another half second. Each side learns its own palm-to-controller orientation from a
 500 ms stable tracking window within three seconds of recentering. Recenter still works

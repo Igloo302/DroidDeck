@@ -8,6 +8,7 @@ import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import com.droiddeck.launcher.xr.AuraXrSettings
 import com.droiddeck.launcher.xr.XrPlatform
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToInt
@@ -28,6 +29,8 @@ internal object XrJoyConSnapshot {
     const val TIME_HIGH = 10
     const val ANGULAR_SPEED = 11
     const val RECENTER_SEQUENCE = 12
+    const val POSITIONAL_TRACKING = 1 shl 7
+    const val OPTICAL_HEADING = 1 shl 8
 }
 
 internal class XrGamepadMenu {
@@ -66,6 +69,7 @@ internal class XrGamepadInput(
     private val bridge: () -> PadBridge?,
 ) : InputManager.InputDeviceListener {
     private val auraJoyCons = XrPlatform.isAuraPuck()
+    private val preferencesContext = context.applicationContext
     private val manager = context.getSystemService(InputManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
     private val menu = XrGamepadMenu()
@@ -125,10 +129,13 @@ internal class XrGamepadInput(
         val state = IntArray(XrJoyConSnapshot.SIZE)
         if (!auraJoyCons || !resumed || !focused) return state
         val now = nowNs()
+        val preferences = AuraXrSettings.read(preferencesContext)
+        val options = (if (preferences.joyCon6Dof) XrJoyConSnapshot.POSITIONAL_TRACKING else 0) or
+            (if (preferences.joyCon6Dof && preferences.cameraGuidedCalibration) XrJoyConSnapshot.OPTICAL_HEADING else 0)
         for (side in joyCons.indices) {
             val hand = joyCons[side] ?: continue
             val base = side * XrJoyConSnapshot.STRIDE
-            state[base + XrJoyConSnapshot.BUTTONS] = JOYCON_CONNECTED or hand.buttons.buttons(now) { orientation.recenter(side) }
+            state[base + XrJoyConSnapshot.BUTTONS] = JOYCON_CONNECTED or options or hand.buttons.buttons(now) { orientation.recenter(side) }
             state[base + XrJoyConSnapshot.STICK_X] = hand.stickX
             state[base + XrJoyConSnapshot.STICK_Y] = hand.stickY
             val sample = orientation.snapshot(side)
