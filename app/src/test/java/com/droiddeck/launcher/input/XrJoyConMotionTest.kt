@@ -51,19 +51,51 @@ class XrJoyConMotionTest {
         assertTrue(sample.fresh(now))
     }
 
-    @Test fun sensorGapDiscardsOldPendingReportsAndStartsNewFilterEpoch() {
+    @Test fun sensorGapDiscardsPendingReportsWithoutChangingHeadingOrEpoch() {
         state.add(faceUp, still, now)
         state.flush()
-        val epoch = state.snapshot().epoch
+        repeat(100) {
+            now += 10_000_000L
+            state.add(faceUp, floatArrayOf(0f, 0f, 1f), now)
+            state.flush()
+        }
+        val before = state.snapshot()
+        assertTrue(before.rotation.rotate(Vec3(0f, 0f, -1f)).x < -.8f)
         now += 10_000_000L
         state.add(faceUp, floatArrayOf(0f, 0f, 9f), now)
-        now += 100_000_001L
+        now += 150_000_000L
         state.add(faceUp, still, now)
         assertFalse(state.snapshot().fresh(now))
+        assertEquals(before.epoch, state.snapshot().epoch)
+        assertRotation(before.rotation, state.snapshot().rotation)
         state.flush()
-        assertEquals(epoch + 1, state.snapshot().epoch)
-        assertRotation(Quaternion.IDENTITY, state.snapshot().rotation)
+        assertEquals(before.epoch, state.snapshot().epoch)
+        assertRotation(before.rotation, state.snapshot().rotation)
         assertEquals(now, state.snapshot().timeNs)
+        assertTrue(state.snapshot().fresh(now))
+    }
+
+    @Test fun sensorGapPreservesLearnedGyroBias() {
+        val biased = floatArrayOf(0f, 0f, .02f)
+        state.add(faceUp, biased, now)
+        state.flush()
+        repeat(2000) {
+            now += 10_000_000L
+            state.add(faceUp, biased, now)
+            state.flush()
+        }
+        val before = state.snapshot()
+        now += 150_000_000L
+        state.add(faceUp, biased, now)
+        state.flush()
+        repeat(100) {
+            now += 10_000_000L
+            state.add(faceUp, biased, now)
+            state.flush()
+        }
+        assertEquals(before.epoch, state.snapshot().epoch)
+        assertRotation(before.rotation, state.snapshot().rotation)
+        assertTrue(state.snapshot().fresh(now))
     }
 
     @Test fun invalidSamplesCannotPoisonOrientationAndRecoveryChangesEpoch() {
@@ -97,7 +129,7 @@ class XrJoyConMotionTest {
         assertFalse(state.snapshot().fresh(now))
     }
 
-    @Test fun savedAccelCalibrationIsUsedBeforeGravityAlignmentAndSurvivesGapReset() {
+    @Test fun savedAccelCalibrationIsUsedBeforeGravityAlignmentAndSurvivesCallbackGap() {
         val scale = 1.04f
         state.reset(floatArrayOf(.4f, -.2f, .3f, scale))
         val raw = floatArrayOf(-.3f, -.4f, -.2f + G / scale)

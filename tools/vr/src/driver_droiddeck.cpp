@@ -1124,6 +1124,7 @@ public:
         const bool optical = opticalActive_;
         opticalInputs_.Reset();
         opticalPose_.Reset();
+        joyConPose_.reset();
         if (androidXr_) xrHandBridge_.reset();
         joyConInputsAt_ = 0;
         joyConIndexCurl_ = joyConGripCurl_ = 0;
@@ -1213,10 +1214,11 @@ public:
             }
         }
         const auto output = xrHandBridge_.update(packet, hand, now, !controls.active);
+        const auto joyConPose = joyConPose_.update(controls, packet, skeleton, hand, now);
         DroidDeckXrHand state{};
         XrTouchInput input;
         if (controls.active) {
-            const auto aim = joyConHandPose(controls, packet, skeleton, hand, now);
+            const auto &aim = joyConPose;
             if (poseValid(aim)) {
                 Quat rawRotation;
                 Vec3 rawPosition;
@@ -1484,6 +1486,7 @@ private:
             unsigned(inputEpochs & 255), unsigned(inputEpochs >> 8));
     }
     droiddeck::xr::SteamVrHandBridge xrHandBridge_;
+    droiddeck::xr::JoyConHandPose joyConPose_;
     std::unique_ptr<droiddeck::HandModel> xrModel_;
     VRInputComponentHandle_t rawPose_ = 0, aimPose_ = 0, gripPose_ = 0, skeleton_ = 0;
     bool androidXr_ = false;
@@ -1764,12 +1767,12 @@ private:
                 VRServerDriverHost()->TrackedDevicePoseUpdated(id_, head, sizeof(head));
                 if (androidXr_) {
                     DroidDeckXrInputV2 input{};
-                    const int64_t now = xr_monotonic_ns();
                     xrInput_.read("/run/droiddeck/" DROIDDECK_XR_INPUT_V2_FILE, input);
-                    if (droiddeck::xr::inputFresh(input, now))
-                        xrHandMode_ = (input.flags & DROIDDECK_XR_INPUT_HAND_MODE) != 0;
                     DroidDeckXrSkeleton skeleton{};
                     if (!xrSkeleton_.read("/run/droiddeck/" DROIDDECK_XR_SKELETON_FILE, skeleton)) skeleton = {};
+                    const int64_t now = xr_monotonic_ns();
+                    if (droiddeck::xr::inputFresh(input, now))
+                        xrHandMode_ = (input.flags & DROIDDECK_XR_INPUT_HAND_MODE) != 0;
                     droiddeck::xr::JoyConHandControls controls[2];
                     for (int hand = 0; hand < 2; ++hand)
                         controls[hand] = droiddeck::xr::joyConHandControls(fresh ? &xr : nullptr, input, hand, now);

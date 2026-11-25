@@ -113,7 +113,7 @@ internal class XrGamepadInput(
             state[base + 2] = hand.stickY
             val sample = orientation.snapshot(side)
             state[base + 8] = sample.epoch
-            if (sample.fresh(now)) {
+            if (sample.fresh(nowNs())) {
                 state[base + 3] = sample.rotation.x.toRawBits()
                 state[base + 4] = sample.rotation.y.toRawBits()
                 state[base + 5] = sample.rotation.z.toRawBits()

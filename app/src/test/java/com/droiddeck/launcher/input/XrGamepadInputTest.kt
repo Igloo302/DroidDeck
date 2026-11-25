@@ -309,6 +309,21 @@ class XrGamepadInputTest {
         assertEquals(q.w.toRawBits(), input.joyConState()[6])
     }
 
+    @Test fun sensorSampleArrivingDuringSnapshotRemainsValidForBothHands() {
+        val left = joyCon(101, JoyCon.LEFT)
+        joyCon(102, JoyCon.RIGHT)
+        input.onInputDeviceAdded(left.id)
+        orientation.beforeSnapshot = { side ->
+            now += 1_000_000L
+            orientation.samples[side] = XrJoyConOrientation(Quaternion.IDENTITY, now, side + 3)
+        }
+        val state = input.joyConState()
+        assertEquals(1, state[7])
+        assertEquals(1, state[16])
+        assertEquals(3, state[8])
+        assertEquals(4, state[17])
+    }
+
     @Test fun staleAndFutureOrientationCannotDisableConnectedControls() {
         val left = joyCon(101, JoyCon.LEFT)
         input.onInputDeviceAdded(left.id)
@@ -419,13 +434,17 @@ class XrGamepadInputTest {
         val samples = Array(2) { XrJoyConOrientation() }
         val owned = arrayOfNulls<Int>(2)
         var closed = false
+        var beforeSnapshot: (Int) -> Unit = {}
         override fun devices(devices: Array<InputDevice?>) {
             for (side in owned.indices) if (owned[side] != devices[side]?.id) {
                 owned[side] = devices[side]?.id
                 samples[side] = XrJoyConOrientation(epoch = samples[side].epoch + 1)
             }
         }
-        override fun snapshot(side: Int) = samples[side]
+        override fun snapshot(side: Int): XrJoyConOrientation {
+            beforeSnapshot(side)
+            return samples[side]
+        }
         override fun recenter(side: Int) { samples[side] = samples[side].copy(epoch = samples[side].epoch + 1) }
         override fun close() { closed = true }
     }

@@ -266,13 +266,15 @@ static void testXrJoyConHybrid() {
         joyCon.trigger = joyCon.squeeze = 1;
         skeleton.sample_monotonic_ns = now - 100000001;
         update();
-        assert(controller.GetPose().deviceIsConnected && !controller.GetPose().poseIsValid);
+        assertHybridPose(wrist.position);
+        assert(controller.GetPose().result == TrackingResult_Running_OutOfRange && model() == controllerModel);
         assert(value("/input/trigger/value") == 1 && value("/input/grip/value") == 1 && value("/input/grip/force") == 1);
         assert(value("/input/system/click") == 1 && value("/input/thumbstick/x") == .5f);
         skeleton.sample_monotonic_ns = now;
         ++skeleton.origin_epoch;
         update();
-        assert(!controller.GetPose().poseIsValid);
+        assertHybridPose(wrist.position);
+        assert(controller.GetPose().result == TrackingResult_Running_OutOfRange);
         --skeleton.origin_epoch;
         joyCon.pose.orientation[0] = NAN;
         update();
@@ -327,6 +329,106 @@ static void testXrJoyConHybrid() {
         VR_CLEANUP_SERVER_DRIVER_CONTEXT();
     }
     puts("PASS: Joy-Con orientation and optical position drive controller models with safe pose loss and hand restoration");
+}
+
+static void testXrJoyConPositionContinuity() {
+    using namespace droiddeck::xr;
+    int64_t now = 1000000000;
+    auto packet = droiddeck_xr_input_v2_neutral(93, 1);
+    packet.flags = DROIDDECK_XR_INPUT_FOCUSED | DROIDDECK_XR_INPUT_HAND_MODE;
+    JoyConHandControls controls[2];
+    JoyConHandPose poses[2];
+    DroidDeckXrSkeleton skeleton{};
+    for (int side = 0; side < 2; ++side) {
+        controls[side].active = true;
+        controls[side].pose.flags = 5;
+        controls[side].pose.orientation[3] = 1;
+        auto &hand = packet.hands[side];
+        hand.source = DROIDDECK_XR_SOURCE_RUNTIME_ACTION;
+        hand.status_bits = DROIDDECK_XR_GRIP_ACTIVE;
+        hand.grip.flags = 10;
+        hand.grip.position[0] = side ? 1.f : -1.f;
+    }
+    const auto update = [&](int side) {
+        packet.sample_monotonic_ns = now;
+        return poses[side].update(controls[side], packet, skeleton, side, now);
+    };
+    for (int side = 0; side < 2; ++side) assert(update(side).flags == 15);
+    now += 14000000;
+    packet.hands[1].grip.flags = 0;
+    const auto turned = AboutY(.6);
+    controls[1].pose.orientation[1] = float(turned.y);
+    controls[1].pose.orientation[3] = float(turned.w);
+    auto held = update(1);
+    assert(held.flags == 7 && held.position[0] == 1);
+    assert(held.orientation[1] == controls[1].pose.orientation[1]);
+    assert(held.orientation[3] == controls[1].pose.orientation[3]);
+    assert(update(0).flags == 15 && update(0).position[0] == -1);
+    now += 14000000;
+    packet.hands[1].grip.flags = 10;
+    packet.hands[1].grip.position[0] = 2;
+    assert(update(1).flags == 15 && update(1).position[0] == 2);
+
+    packet.hands[1].grip.flags = 0;
+    skeleton.session_generation = packet.session_generation;
+    skeleton.origin_epoch = packet.origin_epoch;
+    skeleton.active[1] = 1;
+    skeleton.sample_monotonic_ns = now;
+    skeleton.joints[1][0].flags = 10;
+    skeleton.joints[1][0].position[0] = 3;
+    assert(update(1).flags == 15 && update(1).position[0] == 3);
+    const int64_t observed = now;
+    now = observed + 90000000;
+    assert(update(1).flags == 15);
+    now = observed + 150000000;
+    assert(update(1).flags == 7);
+    now = observed + 200000000;
+    assert(update(1).flags == 7 && update(1).position[0] == 3);
+    ++now;
+    assert(!poseValid(update(1)));
+    assert(!poseValid(update(1)));
+
+    skeleton = {};
+    for (int reason = 0; reason < 8; ++reason) {
+        now += 1000000000;
+        packet.flags = DROIDDECK_XR_INPUT_FOCUSED | DROIDDECK_XR_INPUT_HAND_MODE;
+        packet.hands[1].grip.flags = 10;
+        controls[1].active = true;
+        controls[1].pose.flags = 5;
+        controls[1].pose.orientation[0] = 0;
+        assert(poseValid(update(1)));
+        packet.hands[1].grip.flags = 0;
+        now += 1000000;
+        switch (reason) {
+            case 0: packet.flags &= ~DROIDDECK_XR_INPUT_FOCUSED; break;
+            case 1: packet.flags &= ~DROIDDECK_XR_INPUT_HAND_MODE; break;
+            case 2: controls[1].active = false; break;
+            case 3: controls[1].pose.flags = 0; break;
+            case 4: controls[1].pose.orientation[0] = NAN; break;
+            case 5: ++packet.origin_epoch; break;
+            case 6: ++packet.session_generation; break;
+            case 7: now -= 2000000; break;
+        }
+        assert(!poseValid(update(1)));
+        packet.flags = DROIDDECK_XR_INPUT_FOCUSED | DROIDDECK_XR_INPUT_HAND_MODE;
+        controls[1].active = true;
+        controls[1].pose.flags = 5;
+        controls[1].pose.orientation[0] = 0;
+        now += 2000000;
+        assert(!poseValid(update(1)));
+    }
+    packet.hands[1].grip.flags = 10;
+    assert(poseValid(update(1)));
+    packet.hands[1].grip.flags = 0;
+    packet.sample_monotonic_ns = now - 100000001;
+    assert(!poseValid(poses[1].update(controls[1], packet, skeleton, 1, now)));
+    assert(!poseValid(update(1)));
+    packet.hands[1].grip.flags = 10;
+    assert(poseValid(update(1)));
+    packet.hands[1].grip.flags = 0;
+    poses[1].reset();
+    assert(!poseValid(update(1)));
+    puts("PASS: hybrid optical position holds at most 200ms with live IMU, independent sides and epoch/focus resets");
 }
 
 int main() {
@@ -715,5 +817,6 @@ int main() {
     assert(!xrContext.input.values.count(0));
     puts("PASS: Galaxy XR Touch and tracked hands keep separate profiles across switches and release held input");
     testXrJoyConHybrid();
+    testXrJoyConPositionContinuity();
     testJoyConInputParity();
 }

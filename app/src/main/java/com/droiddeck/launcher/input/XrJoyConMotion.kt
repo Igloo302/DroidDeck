@@ -52,7 +52,11 @@ internal class XrJoyConMotionState {
             reset()
             return 0
         }
-        if (arrivalNs != 0L && nowNs - arrivalNs !in 0..XrJoyConOrientation.MAX_AGE_NS) reset()
+        if (arrivalNs != 0L && nowNs < arrivalNs) reset()
+        else if (arrivalNs != 0L && nowNs - arrivalNs > XrJoyConOrientation.MAX_AGE_NS) {
+            reports = JoyConReports()
+            current = current.copy(timeNs = 0L)
+        }
         arrivalNs = nowNs
         reports.add(accel, gyro, nowNs)
         return reports.size
