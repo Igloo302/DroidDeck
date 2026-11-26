@@ -67,13 +67,14 @@ class TextEditorLogicTest {
     }
 
     @Test
-    fun tabsExpandToTabStops() {
-        assertEquals("ab  c", expandEditorTabs("ab\tc"))
-        assertEquals("    x", expandEditorTabs("\tx"))
-        assertEquals("abcd    e", expandEditorTabs("abcd\te"))
-        assertEquals("abc def g", expandEditorTabs("abc\tdef\tg"))
-        assertEquals("a   \n    b", expandEditorTabs("a\t\n\tb"))
-        assertEquals("plain text", expandEditorTabs("plain text"))
+    fun decodingAndReplacingPreservesUneditedTabsAndLineEndings() {
+        for (charset in EditorCharset.entries) {
+            val original = "target:\r\n\tcommand\r\nname\tvalue\t你好\r\n"
+            val bytes = original.toByteArray(charset.charset)
+            val decoded = decodeEditorText(bytes)
+            val edited = replaceEditorMatches(decoded.text, findEditorMatches(decoded.text, "command"), "updated")
+            assertArrayEquals(original.replace("command", "updated").toByteArray(charset.charset), edited.toByteArray(decoded.charset.charset))
+        }
     }
 
     @Test
