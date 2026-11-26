@@ -760,7 +760,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ../robolectric-jars
-          key: robolectric-android-all-v3-${{ steps.robolectric.outputs.version }}-${{ github.run_id }}
+          key: robolectric-android-all-v3-${{ steps.robolectric.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: robolectric-android-all-v3-${{ steps.robolectric.outputs.version }}-
       - name: Count the restored Robolectric jars
         if: steps.robolectric-jars.outputs.cache == 'true'
@@ -801,7 +801,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ../robolectric-jars
-          key: robolectric-android-all-v3-${{ steps.robolectric.outputs.version }}-${{ github.run_id }}
+          key: robolectric-android-all-v3-${{ steps.robolectric.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload unit test diagnostics
         id: unit-test-diagnostics
