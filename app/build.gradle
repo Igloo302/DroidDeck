@@ -238,6 +238,8 @@ android {
             doFirst { jvmTemp.mkdirs() }
             def logTarget = providers.systemProperty('robolectric.logging').orNull
             if (logTarget != null) systemProperty 'robolectric.logging', logTarget
+            systemProperty 'robolectric.dependency.repo.url', providers.systemProperty('robolectric.dependency.repo.url')
+                .getOrElse('https://repo.maven.apache.org/maven2')
         }
     }
 
