@@ -119,6 +119,15 @@
                 android:value="XR_ACTIVITY_START_MODE_FULL_SPACE_UNMANAGED" />
             <meta-data android:name="android.app.lib_name" android:value="droiddeckandroidxr" />
         </activity>
+        <activity android:name=".AuraXrActivity" android:exported="false"
+            android:launchMode="singleTask" android:taskAffinity="${applicationId}.aura_xr"
+            android:resizeableActivity="false" android:enableOnBackInvokedCallback="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+            <property android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
+                android:value="XR_ACTIVITY_START_MODE_FULL_SPACE_UNMANAGED" />
+            <meta-data android:name="android.app.lib_name" android:value="droiddeckandroidxr" />
+        </activity>
         <activity android:name=".QuestXrActivity" android:exported="true" android:launchMode="singleTask"
             android:permission="android.permission.DUMP"
             android:resizeableActivity="false" android:screenOrientation="landscape"

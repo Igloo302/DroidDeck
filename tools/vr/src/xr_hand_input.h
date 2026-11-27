@@ -1,6 +1,7 @@
 #pragma once
 #include "xr_input_v2.h"
 #include "xr_touch_input.h"
+#include "xr_tracking_file.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -22,6 +23,36 @@ inline bool inputHeaderValid(const DroidDeckXrInputV2 &packet) {
 inline bool inputFresh(const DroidDeckXrInputV2 &packet, int64_t now) {
     return inputHeaderValid(packet) && packet.sample_monotonic_ns > 0 && now >= packet.sample_monotonic_ns
         && now - packet.sample_monotonic_ns <= 100000000LL;
+}
+
+struct JoyConHandControls {
+    bool active = false;
+    XrTouchInput input;
+    DroidDeckXrPose pose{};
+    DroidDeckXrPose head{};
+    bool opticalPosition = false;
+    int64_t sampledNs = 0;
+};
+
+inline bool xrHandTrackingFresh(const DroidDeckXrTracking *tracking, int64_t now) {
+    return tracking && isAndroidXr(*tracking) && XrTrackingFile::Fresh(*tracking, now)
+        && now - tracking->sampled_ns <= 100000000LL;
+}
+
+inline DroidDeckXrInputV2 xrHandInputForTracking(const DroidDeckXrTracking *tracking,
+        const DroidDeckXrInputV2 &packet, int64_t now) {
+    return xrHandTrackingFresh(tracking, now) ? packet : DroidDeckXrInputV2{};
+}
+
+inline JoyConHandControls joyConHandControls(const DroidDeckXrTracking *tracking,
+        const DroidDeckXrInputV2 &packet, int hand, int64_t now) {
+    if (hand < 0 || hand > 1 || !xrHandTrackingFresh(tracking, now)
+            || !inputFresh(packet, now) || !(packet.flags & DROIDDECK_XR_INPUT_FOCUSED)
+            || !(packet.flags & DROIDDECK_XR_INPUT_HAND_MODE)
+            || tracking->hands[hand].active != DROIDDECK_XR_JOYCON_ACTIVE) return {};
+    return {true, xr_touch_input(tracking->hands[hand], false), tracking->hands[hand].pose,
+            XrTrackingFile::Tracked(tracking->head) ? tracking->head : DroidDeckXrPose{},
+            (tracking->hands[hand].buttons & DROIDDECK_XR_JOYCON_6DOF) != 0, tracking->sampled_ns};
 }
 
 inline bool poseValid(const DroidDeckXrPoseV2 &pose) {
@@ -58,7 +89,7 @@ private:
 
 class SteamVrHandBridge {
 public:
-    HandOutput update(const DroidDeckXrInputV2 &packet, int hand, int64_t now) {
+    HandOutput update(const DroidDeckXrInputV2 &packet, int hand, int64_t now, bool gestures = true) {
         if (hand < 0 || hand > 1) return {};
         if (generation_ != packet.session_generation || epoch_ != packet.origin_epoch) {
             reset(); generation_ = packet.session_generation; epoch_ = packet.origin_epoch;
@@ -70,6 +101,7 @@ public:
             (input.status_bits & DROIDDECK_XR_GRIP_ACTIVE) &&
             input.source == DROIDDECK_XR_SOURCE_RUNTIME_ACTION;
         if (!valid) { trigger_.reset(); grasp_.reset(); return {}; }
+        if (!gestures) { reset(); return {true}; }
         const bool select = input.capability_bits & DROIDDECK_XR_SELECT;
         const uint32_t action = select ? DROIDDECK_XR_SELECT : DROIDDECK_XR_PINCH;
         const uint32_t active = select ? DROIDDECK_XR_SELECT_ACTIVE : DROIDDECK_XR_PINCH_ACTIVE;
@@ -94,11 +126,11 @@ private:
 class HandDashboardChord {
 public:
     bool held() const { return fired_; }
-    bool update(const DroidDeckXrInputV2 &packet, int64_t now) {
+    bool update(const DroidDeckXrInputV2 &packet, int64_t now, uint32_t joyConHands = 0) {
         auto pinch = packet;
         for (auto &hand : pinch.hands) hand.capability_bits &= ~DROIDDECK_XR_SELECT;
-        const auto left = hands_[0].update(pinch, 0, now);
-        const auto right = hands_[1].update(pinch, 1, now);
+        const auto left = hands_[0].update(pinch, 0, now, !(joyConHands & 1u));
+        const auto right = hands_[1].update(pinch, 1, now, !(joyConHands & 2u));
         if (!left.active || !right.active || !left.triggerDown || !right.triggerDown || now < started_) {
             started_ = 0; fired_ = false; return false;
         }

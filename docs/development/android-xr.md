@@ -40,6 +40,57 @@ The existing `scene-focus.json` controls local glove visibility: only a live Ste
 
 Holding both runtime pinch values requests a system-button pulse after releasing trigger/grip. Ordinary gamepads route through PadBridge; View/Select + Menu/Start requests the same pulse. A gamepad does not become a tracked hand, and applications must support gamepad navigation. Orientation, drag and menu recall still need hardware acceptance.
 
+## AURA Joy-Con settings and heading stabilization
+
+The Android XR Joy-Con path is enabled only on the XREAL AURA Android XR puck, matching
+`Build.MANUFACTURER=XREAL`, `Build.MODEL=Android XR Puck` and `Build.DEVICE=axrpuck`
+(case-insensitively). Other devices retain ordinary Joy-Con gamepad routing. They do not
+claim Joy-Cons for XR, subscribe to their IMU sensors, or publish hybrid controller packets,
+so hand-based placement, stomach-level fallback, optical heading correction and Joy-Con
+controller visuals remain inactive there. This gate does not depend on attached USB glasses.
+
+On AURA, Android Back opens the existing DroidDeck session menu. Closing the menu returns
+to the immersive view. The AURA activity has a separate task so opening the menu does not
+destroy the native XR session or its Joy-Con orientation state. Other Android XR devices
+retain their existing Back behavior.
+
+The puck has an AURA pane in Smart glasses settings. **SteamVR view zoom** defaults to
+100% and can magnify the view up to 300%. It applies the same per-eye visual zoom to the
+guest image and locally rendered gloves without changing SteamVR resolution settings or
+the physical lens field of view. It takes effect live and is independent of Joy-Con mode.
+
+**Experimental Joy-Con 6DoF** and
+**Camera-guided calibration** both default to off, including upgrades without saved choices.
+With 6DoF off, Joy-Con buttons and IMU aim remain active, and the existing arm model supplies
+inferred controller placement relative to the head. Optical hand poses and remembered optical
+positions do not influence the controllers. Ordinary hand tracking remains available when
+Joy-Cons are disconnected.
+
+With experimental 6DoF on, the controller's IMU supplies aim and OpenXR hands supply position,
+with the existing stomach-level fallback when hands are lost. Camera-guided calibration is
+a separate opt-in and only takes effect while 6DoF is on. Disabling camera assistance clears
+the learned optical reference; enabling it again requires another manual recenter to calibrate.
+Manual recenter remains available in either mode, without requiring visible hands.
+
+With both options enabled, look forward, point the Joy-Con forward with the
+hand visible, and hold Capture (left) or Home (right) for 0.8 seconds. Keep the hand steady
+for another half second. Each side learns its own palm-to-controller orientation from a
+500 ms stable tracking window within three seconds of recentering. Recenter still works
+without visible hands; in that case optical stabilization stays inactive.
+
+Once calibrated, steady tracked palms and wrists can correct yaw at up to one degree per
+second, with a one-degree deadband and five-second response. Pitch, roll, buttons and immediate
+IMU motion remain unchanged. Correction pauses during swings, stale sensors, optical loss or
+reacquisition. Persistent errors above 30 degrees or inconsistent hand orientation require
+another recenter. A changed grip can resemble drift; recalibrate after changing the grip.
+The reference is not saved across controller/fusion resets or XR session/origin changes.
+
+Ordinary device metadata changes preserve fusion and heading when controller and sensor
+identities match. Diagnostics distinguish manual recenter, sensor reset and missing samples.
+The `joyConHeading` entries in `xr-health.json` report reference readiness, heading error,
+applied correction, sample age and alignment reason. Optical calibration needs actual tracked
+joint poses; inferred hand positions, aiming rays and the stomach-level fallback are not references.
+
 ## Protocol and rendering
 
 The existing 296-byte tracking protocol v1 is unchanged. Quest continues to publish `active=1`; Android XR uses an explicit active-session marker to select its additional input path. The driver reads input-v2 and skeleton sidecars only in that Android XR session. Sidecars carry session generation, origin epoch and timestamps, with atomic snapshots and single-writer ownership.

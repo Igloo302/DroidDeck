@@ -31,10 +31,7 @@ private:
 };
 
 inline Quat ShoulderAim(const Vec3 &head, const Quat &headRotation, const Vec3 &palm, bool right, const Quat &fallback) {
-    const Vec3 headRight = Rotate(headRotation, {1, 0, 0});
-    double yaw = 0;
-    if (!Heading(headRotation, &yaw)) yaw = std::atan2(-headRight.z, headRight.x);
-    const Quat torso = AboutY(yaw);
+    const Quat torso = AboutY(HeadHeading(headRotation));
     const Vec3 shoulder = head + Rotate(torso, {right ? .18 : -.18, -.28, 0});
     const Vec3 reach = palm - shoulder;
     const double distance = Length(reach);

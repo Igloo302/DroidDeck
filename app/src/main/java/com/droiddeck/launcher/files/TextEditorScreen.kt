@@ -2,28 +2,20 @@ package com.droiddeck.launcher.files
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
@@ -48,26 +40,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.droiddeck.launcher.R
 import com.droiddeck.launcher.ui.focusGlide
 import kotlinx.coroutines.Dispatchers
@@ -81,7 +65,6 @@ import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
-import kotlin.math.roundToInt
 
 internal const val EDITOR_FONT_SIZE_SP = 13
 internal const val EDITOR_LINE_HEIGHT_SP = 18
@@ -143,30 +126,6 @@ internal fun readCapped(input: InputStream, limit: Long): ByteArray? {
         if (total > limit) return null
         out.write(buffer, 0, n)
     }
-}
-
-internal fun expandEditorTabs(text: String, width: Int = EDITOR_TAB_WIDTH): String {
-    if (text.indexOf('\t') < 0) return text
-    val out = StringBuilder(text.length)
-    var column = 0
-    for (c in text) {
-        when (c) {
-            '\n' -> {
-                out.append(c)
-                column = 0
-            }
-            '\t' -> {
-                val pad = width - (column % width)
-                repeat(pad) { out.append(' ') }
-                column += pad
-            }
-            else -> {
-                out.append(c)
-                column++
-            }
-        }
-    }
-    return out.toString()
 }
 
 internal fun lineCountOf(text: String): Int {
@@ -236,7 +195,6 @@ internal fun TextEditorScreen(
 
     var text by remember { mutableStateOf("") }
     var selection by remember { mutableStateOf(TextRange.Zero) }
-    var composing by remember { mutableStateOf<TextRange?>(null) }
     var loadState by remember { mutableStateOf(EditorLoadState.LOADING) }
     var lock by remember { mutableStateOf(EditorLock.NONE) }
     var charset by remember { mutableStateOf(EditorCharset.UTF8) }
@@ -249,26 +207,15 @@ internal fun TextEditorScreen(
     var matchCase by remember { mutableStateOf(false) }
     var matchIndex by remember { mutableIntStateOf(0) }
 
-    val scrollState = rememberScrollState()
-    val textHorizontalState = rememberScrollState()
-    var viewportHeight by remember { mutableIntStateOf(0) }
-    var viewportWidth by remember { mutableIntStateOf(0) }
-
-    val lineHeightDp = with(density) { EDITOR_LINE_HEIGHT_SP.sp.toDp() }
-    val lineHeightPx = with(density) { lineHeightDp.toPx() }
-    val totalLines = remember(text) { lineCountOf(text) }
     val cursorLine = lineIndexOfOffset(text, selection.end)
     val cursorColumn = columnOfOffset(text, selection.end)
     val matches = remember(text, query, matchCase) { findEditorMatches(text, query, matchCase) }
     val readOnly = lock != EditorLock.NONE
-    val bodyStyle = TextStyle(
-        fontFamily = FontFamily.Monospace,
-        fontSize = EDITOR_FONT_SIZE_SP.sp,
-        lineHeight = EDITOR_LINE_HEIGHT_SP.sp,
-        color = MaterialTheme.colorScheme.onBackground,
-    )
-    val textMeasurer = rememberTextMeasurer()
-    val charWidthPx = remember(bodyStyle) { textMeasurer.measure(text = "0", style = bodyStyle).size.width.toFloat() }
+    val textSizePx = with(density) { EDITOR_FONT_SIZE_SP.sp.toPx() }
+    val lineHeightPx = with(density) { EDITOR_LINE_HEIGHT_SP.sp.toPx() }
+    val bodyColor = MaterialTheme.colorScheme.onBackground.toArgb()
+    val mutedColor = MaterialTheme.colorScheme.onSurfaceVariant.toArgb()
+    val cursorColor = MaterialTheme.colorScheme.primary.toArgb()
 
     LaunchedEffect(file) {
         loadState = EditorLoadState.LOADING
@@ -286,7 +233,7 @@ internal fun TextEditorScreen(
             return@LaunchedEffect
         }
         val decoded = decodeEditorText(bytes)
-        text = expandEditorTabs(decoded.text)
+        text = decoded.text
         charset = decoded.charset
         lock = when {
             editorIsBinary(bytes) -> EditorLock.BINARY
@@ -299,42 +246,11 @@ internal fun TextEditorScreen(
         loadState = EditorLoadState.READY
     }
 
-    suspend fun revealLine(line: Int) {
-        val current = scrollState.value
-        val top = line * lineHeightPx
-        val target = when {
-            top < current -> top
-            top + lineHeightPx > current + viewportHeight -> top + lineHeightPx - viewportHeight
-            else -> return
-        }
-        val clamped = target.roundToInt().coerceIn(0, scrollState.maxValue)
-        if (clamped != current) scrollState.scrollTo(clamped)
-    }
-
-    LaunchedEffect(text, selection.end, viewportHeight, viewportWidth) {
-        if (loadState != EditorLoadState.READY) return@LaunchedEffect
-        revealLine(lineIndexOfOffset(text, selection.end))
-        if (viewportWidth > 0 && charWidthPx > 0) {
-            val x = (columnOfOffset(text, selection.end) - 1) * charWidthPx
-            val current = textHorizontalState.value
-            val target = when {
-                x < current -> x
-                x + charWidthPx > current + viewportWidth -> x + charWidthPx - viewportWidth
-                else -> null
-            }
-            if (target != null) {
-                val clamped = target.roundToInt().coerceIn(0, textHorizontalState.maxValue)
-                if (clamped != current) textHorizontalState.scrollTo(clamped)
-            }
-        }
-    }
-
     LaunchedEffect(query, matchCase) {
         if (query.isEmpty()) return@LaunchedEffect
         matchIndex = 0
         val first = matches.firstOrNull() ?: return@LaunchedEffect
         selection = TextRange(first.first, first.last + 1)
-        composing = TextRange.Zero
     }
 
     LaunchedEffect(text) { matchIndex = 0 }
@@ -344,7 +260,6 @@ internal fun TextEditorScreen(
         matchIndex = Math.floorMod(matchIndex + delta, matches.size)
         val m = matches[matchIndex]
         selection = TextRange(m.first, m.last + 1)
-        composing = TextRange.Zero
     }
 
     fun replaceCurrent() {
@@ -354,7 +269,6 @@ internal fun TextEditorScreen(
         dirty = true
         matchIndex = 0
         selection = TextRange(m.first + replacement.length)
-        composing = TextRange.Zero
     }
 
     fun replaceAll() {
@@ -364,7 +278,6 @@ internal fun TextEditorScreen(
         dirty = true
         matchIndex = 0
         selection = TextRange.Zero
-        composing = TextRange.Zero
     }
 
     fun save() {
@@ -599,8 +512,7 @@ internal fun TextEditorScreen(
         Box(
             modifier = Modifier
                 .weight(1f)
-                .fillMaxWidth()
-                .onSizeChanged { viewportHeight = it.height },
+                .fillMaxWidth(),
         ) {
             when (loadState) {
                 EditorLoadState.LOADING -> CircularProgressIndicator(
@@ -624,45 +536,16 @@ internal fun TextEditorScreen(
                     )
                 }
 
-                EditorLoadState.READY -> Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(scrollState),
-                ) {
-                    Row(modifier = Modifier.fillMaxWidth().height(lineHeightDp * totalLines.toFloat())) {
-                        LineNumbers(
-                            scrollState = scrollState,
-                            viewportHeight = viewportHeight,
-                            lineHeightDp = lineHeightDp,
-                            lineHeightPx = lineHeightPx,
-                            totalLines = totalLines,
-                            cursorLine = cursorLine,
-                            style = bodyStyle,
-                            mutedColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            cursorColor = MaterialTheme.colorScheme.primary,
-                        )
-                        Box(modifier = Modifier.weight(1f).onSizeChanged { viewportWidth = it.width }.horizontalScroll(textHorizontalState)) {
-                            BasicTextField(
-                                value = TextFieldValue(text = text, selection = selection, composition = composing),
-                                onValueChange = { next ->
-                                    val changed = next.text != text
-                                    text = next.text
-                                    selection = next.selection
-                                    composing = next.composition
-                                    if (changed) dirty = true
-                                },
-                                readOnly = readOnly,
-                                textStyle = bodyStyle,
-                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Text,
-                                    capitalization = KeyboardCapitalization.None,
-                                ),
-                                modifier = Modifier.fillMaxHeight().focusGlide(),
-                            )
+                EditorLoadState.READY -> AndroidView(
+                    factory = { TextEditorView(it) },
+                    modifier = Modifier.fillMaxSize(),
+                    update = { editor ->
+                        editor.bind(text, selection, readOnly, textSizePx, lineHeightPx, bodyColor, mutedColor, cursorColor) { value, range ->
+                            if (value != text) { text = value; dirty = true }
+                            selection = range
                         }
-                    }
-                }
+                    },
+                )
             }
         }
 
@@ -685,42 +568,6 @@ internal fun TextEditorScreen(
                     maxLines = 1,
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun LineNumbers(
-    scrollState: ScrollState,
-    viewportHeight: Int,
-    lineHeightDp: Dp,
-    lineHeightPx: Float,
-    totalLines: Int,
-    cursorLine: Int,
-    style: TextStyle,
-    mutedColor: Color,
-    cursorColor: Color,
-    modifier: Modifier = Modifier,
-) {
-    val firstLine = (scrollState.value / lineHeightPx).toInt().coerceIn(0, totalLines - 1)
-    val lastLine = ((scrollState.value + viewportHeight) / lineHeightPx)
-        .toInt()
-        .coerceIn(firstLine, totalLines - 1)
-    Column(
-        horizontalAlignment = Alignment.End,
-        modifier = modifier
-            .width(IntrinsicSize.Min)
-            .padding(top = lineHeightDp * firstLine.toFloat()),
-    ) {
-        for (line in firstLine..lastLine) {
-            Text(
-                text = (line + 1).toString(),
-                color = if (line == cursorLine) cursorColor else mutedColor,
-                textAlign = TextAlign.End,
-                maxLines = 1,
-                style = style,
-                modifier = Modifier.fillMaxWidth().height(lineHeightDp),
-            )
         }
     }
 }

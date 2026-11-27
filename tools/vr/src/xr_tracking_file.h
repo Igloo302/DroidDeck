@@ -45,8 +45,8 @@ public:
     static double PoseTimeOffset(int64_t predicted, int64_t now) {
         return predicted > 0 ? (static_cast<double>(predicted) - static_cast<double>(now)) / 1000000000.0 : 0;
     }
-    static bool Fresh(const DroidDeckXrTracking &packet) {
-        int64_t age = Now() - packet.sampled_ns;
+    static bool Fresh(const DroidDeckXrTracking &packet, int64_t now = Now()) {
+        int64_t age = now - packet.sampled_ns;
         return packet.active && age >= 0 && age < 500000000LL && packet.period_ns >= 1000000LL
             && packet.period_ns <= 50000000LL && packet.eyes[0].width > 0 && packet.eyes[0].width <= 8192
             && packet.eyes[0].height > 0 && packet.eyes[0].height <= 8192;

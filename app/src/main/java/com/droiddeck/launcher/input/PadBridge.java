@@ -55,6 +55,7 @@ public final class PadBridge {
     private final int[] owners = new int[SLOTS];
     private final int[] partners = new int[SLOTS];
     private volatile java.util.function.IntPredicate excluded = id -> false;
+    private Object xrJoyConOwner;
     private final FakeInputWriter[] playerWriters = new FakeInputWriter[SLOTS];
     private final PadState[] playerStates = new PadState[SLOTS];
     private final float[][] rawSticks = new float[SLOTS][4];
@@ -177,6 +178,22 @@ public final class PadBridge {
 
     public void setExcluded(java.util.function.IntPredicate devices) {
         excluded = devices;
+    }
+
+    public synchronized void claimXrJoyCons(Object owner) {
+        xrJoyConOwner = java.util.Objects.requireNonNull(owner);
+        for (int id : InputDevice.getDeviceIds()) {
+            if (JoyCon.side(InputDevice.getDevice(id)) >= 0) onDeviceRemoved(id);
+        }
+    }
+
+    public synchronized void releaseXrJoyCons(Object owner) {
+        if (xrJoyConOwner == owner) xrJoyConOwner = null;
+    }
+
+    private boolean isExcluded(int deviceId) {
+        return excluded.test(deviceId) ||
+                (xrJoyConOwner != null && JoyCon.side(InputDevice.getDevice(deviceId)) >= 0);
     }
 
     public synchronized void setBuiltinPad(boolean on) {
@@ -363,7 +380,7 @@ public final class PadBridge {
     public synchronized void syncConnectedControllers(java.util.function.Predicate<InputDevice> accepts) {
         for (int deviceId : InputDevice.getDeviceIds()) {
             InputDevice device = InputDevice.getDevice(deviceId);
-            if (!isFromController(device) || excluded.test(deviceId) || !accepts.test(device)) continue;
+            if (!isFromController(device) || isExcluded(deviceId) || !accepts.test(device)) continue;
             int slot = slotFor(device);
             if (slot >= 0) publish(slot);
         }
@@ -392,7 +409,7 @@ public final class PadBridge {
 
     public synchronized boolean onKeyEvent(KeyEvent event) {
         InputDevice device = event.getDevice();
-        if (!isControllerKeyEvent(event, device) || excluded.test(event.getDeviceId())) return false;
+        if (!isControllerKeyEvent(event, device) || isExcluded(event.getDeviceId())) return false;
         int slot = slotFor(device);
         if (slot < 0) return false;
         int side = JoyCon.side(device);
@@ -453,8 +470,8 @@ public final class PadBridge {
         for (int slot = 0; slot < SLOTS; slot++) {
             if (retainedSticks[slot] == 0) continue;
             int owner = owners[slot], partner = partners[slot];
-            if (owner != NO_CONTROLLER && (InputDevice.getDevice(owner) == null || excluded.test(owner))) leave(slot, owner);
-            if (partner != NO_CONTROLLER && (InputDevice.getDevice(partner) == null || excluded.test(partner))) leave(slot, partner);
+            if (owner != NO_CONTROLLER && (InputDevice.getDevice(owner) == null || isExcluded(owner))) leave(slot, owner);
+            if (partner != NO_CONTROLLER && (InputDevice.getDevice(partner) == null || isExcluded(partner))) leave(slot, partner);
             if (retainedSticks[slot] == 0) continue;
             projectSticks(slot);
             publish(slot);
@@ -508,7 +525,7 @@ public final class PadBridge {
 
     public synchronized boolean onMotionEvent(MotionEvent event) {
         InputDevice device = event.getDevice();
-        if (!isControllerMotionEvent(event, device) || excluded.test(event.getDeviceId())) return false;
+        if (!isControllerMotionEvent(event, device) || isExcluded(event.getDeviceId())) return false;
         if (event.getAction() != MotionEvent.ACTION_MOVE) return false;
         int slot = slotFor(device);
         if (slot < 0) return false;

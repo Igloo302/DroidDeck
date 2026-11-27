@@ -133,7 +133,8 @@ internal fun SteamHome(s: FrontEndState, a: FrontEndActions, modifier: Modifier)
         drop = drop.takeIf { headset },
         overlay = { lifted ->
             if (headset) DropSheet(
-                drop, (if (nativeXr) emptyList() else glassesTabs(glasses)) + (GlassesTab.CONTROLLERS to stringResource(R.string.vr_controllers_tab)), covered = lifted,
+                drop, (if (nativeXr && !com.droiddeck.launcher.xr.XrPlatform.isAuraPuck()) emptyList() else glassesTabs(glasses)) +
+                    (GlassesTab.CONTROLLERS to stringResource(R.string.vr_controllers_tab)), covered = lifted,
                 button = { enabled ->
                     PrimaryButton(stringResource(R.string.games_play_steamvr), enabled = !s.busy && (nativeXr || glasses.usable), large = true, icon = Icons.Filled.PlayArrow, fill = true,
                         modifier = Modifier.fillMaxWidth().testTag("play-steamvr")) { if (enabled) { drop.open = false; a.onPlaySteamVr() } }
@@ -341,8 +342,8 @@ internal fun TiltedWall(
 @Composable
 private fun rememberCapsuleArt(model: Any, size: Size, radius: Float): Painter {
     val context = LocalContext.current
-    val w = size.width.roundToInt()
-    val h = size.height.roundToInt()
+    val w = size.width.roundToInt().coerceAtLeast(1)
+    val h = size.height.roundToInt().coerceAtLeast(1)
     return rememberAsyncImagePainter(
         remember(model, w, h, radius) {
             ImageRequest.Builder(context).data(model).size(w, h).scale(Scale.FILL)

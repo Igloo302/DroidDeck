@@ -26,9 +26,11 @@ enum class XrGpuFrameState { Invalid, Stale, Ready };
 inline XrGpuFrameState xr_gpu_frame_state(const XrGpuFrame &frame, uint32_t width, uint32_t height,
                                          uint64_t previous, int64_t now) {
     if (frame.slot >= XR_GPU_SLOTS || (frame.flags & ~XR_GPU_BGRA) || !xr_frame_valid(frame.header)
-        || frame.header.width != width || frame.header.height != height || frame.header.frame_id <= previous
-        || frame.header.captured_ns > now + 100000000LL) return XrGpuFrameState::Invalid;
-    return now - frame.header.captured_ns > 200000000LL ? XrGpuFrameState::Stale : XrGpuFrameState::Ready;
+        || frame.header.width != width || frame.header.height != height || frame.header.frame_id <= previous)
+        return XrGpuFrameState::Invalid;
+    // Suspension can shift the guest clock after a frame has already been captured.
+    return frame.header.captured_ns > now + 100000000LL || now - frame.header.captured_ns > 200000000LL
+        ? XrGpuFrameState::Stale : XrGpuFrameState::Ready;
 }
 
 inline bool xr_gpu_send(int socket, const void *data, size_t size, const int *fds = nullptr, unsigned count = 0) {

@@ -26,12 +26,15 @@ class SettingsResetTest {
     private val session get() = prefs("session")
 
     @Before fun clear() {
-        listOf("session", "controller", "input-profiles", "input-surfaces", "app-ui", "frame_gen", "steam_touch", "agent").forEach {
+        listOf("session", "controller", "input-profiles", "input-surfaces", "app-ui", "frame_gen", "steam_touch", "agent", "aura-xr").forEach {
             prefs(it).edit().clear().commit()
         }
     }
 
-    @Test fun settingsGoBackToTheirDefaults() {
+    // API 33 AtomicFile replaces files with File.renameTo, which fails on the Windows Robolectric host.
+    @Test
+    @Config(sdk = [28])
+    fun settingsGoBackToTheirDefaults() {
         SessionPrefs.setTheme(app, "ocean")
         SessionPrefs.setBackDoubleTapMs(app, 100)
         SessionPrefs.setPenSetting(app, "pen", SessionPrefs.PEN_TOUCH)
@@ -56,6 +59,9 @@ class SettingsResetTest {
         AppUiPrefs.setScale(app, 150)
         FrameGen.set(app, FrameGen.Mode(FrameGen.ENGINE_DDFG, 3))
         prefs("steam_touch").edit().putBoolean("gyro", false).commit()
+        com.droiddeck.launcher.xr.AuraXrSettings.setJoyCon6Dof(app, true)
+        com.droiddeck.launcher.xr.AuraXrSettings.setCameraGuidedCalibration(app, true)
+        com.droiddeck.launcher.xr.AuraXrSettings.setViewZoomPercent(app, 200)
 
         assertTrue(SettingsReset.resetAll(app, gameProfiles = false))
 
@@ -85,6 +91,7 @@ class SettingsResetTest {
         assertEquals(AppUiPrefs.DEFAULT_SCALE, AppUiPrefs.scale(app))
         assertEquals(FrameGen.Mode.OFF.engine, FrameGen.engine(app))
         assertFalse(prefs("steam_touch").contains("gyro"))
+        assertEquals(com.droiddeck.launcher.xr.AuraXrPreferences(), com.droiddeck.launcher.xr.AuraXrSettings.stored(app))
     }
 
     @Test fun penSettingsKeepOnlyKnownValues() {

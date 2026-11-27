@@ -8,7 +8,30 @@ import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import com.droiddeck.launcher.xr.AuraXrSettings
+import com.droiddeck.launcher.xr.XrPlatform
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.roundToInt
+
+internal object XrJoyConSnapshot {
+    const val STRIDE = 13
+    const val SIZE = 2 * STRIDE
+    const val BUTTONS = 0
+    const val STICK_X = 1
+    const val STICK_Y = 2
+    const val QUATERNION_X = 3
+    const val QUATERNION_Y = 4
+    const val QUATERNION_Z = 5
+    const val QUATERNION_W = 6
+    const val FRESH = 7
+    const val EPOCH = 8
+    const val TIME_LOW = 9
+    const val TIME_HIGH = 10
+    const val ANGULAR_SPEED = 11
+    const val RECENTER_SEQUENCE = 12
+    const val POSITIONAL_TRACKING = 1 shl 7
+    const val OPTICAL_HEADING = 1 shl 8
+}
 
 internal class XrGamepadMenu {
     data class Result(val consume: Boolean = false, val request: Boolean = false)
@@ -39,14 +62,43 @@ internal class XrGamepadMenu {
     fun clear() { devices.clear() }
 }
 
-internal class XrGamepadInput(context: Context, private val bridge: () -> PadBridge?) : InputManager.InputDeviceListener {
+internal class XrGamepadInput(
+    context: Context,
+    private val nowNs: () -> Long = System::nanoTime,
+    private val orientation: XrJoyConMotionSource = XrJoyConMotion(context, nowNs),
+    private val bridge: () -> PadBridge?,
+) : InputManager.InputDeviceListener {
+    private val auraJoyCons = XrPlatform.isAuraPuck()
+    private val preferencesContext = context.applicationContext
     private val manager = context.getSystemService(InputManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
     private val menu = XrGamepadMenu()
     private val sequence = AtomicInteger()
+    private class JoyConState(val deviceId: Int, val side: Int) {
+        val buttons = JoyConButtons(side)
+        var stickX = 0
+        var stickY = 0
+        fun release() {
+            buttons.clear(); stickX = 0; stickY = 0
+        }
+        fun stick(x: Float, y: Float) {
+            val normalized = JoyConControls.stick(x, y)
+            stickX = stickValue(normalized.x)
+            stickY = stickValue(normalized.y)
+        }
+    }
+    private val joyCons = arrayOfNulls<JoyConState>(2)
+    private var joyConBridge: PadBridge? = null
     private var resumed = false
     private var focused = false
+    private var menuOpen = false
     val menuSequence: Int get() = sequence.get()
+
+    @Synchronized fun setMenuOpen(open: Boolean) {
+        if (!auraJoyCons || menuOpen == open) return
+        menuOpen = open
+        release()
+    }
 
     @Synchronized fun resume() {
         if (resumed) return
@@ -61,7 +113,15 @@ internal class XrGamepadInput(context: Context, private val bridge: () -> PadBri
         resumed = false
         manager.unregisterInputDeviceListener(this)
         release()
+        if (auraJoyCons) orientation.devices(arrayOfNulls(2))
+        joyConBridge?.releaseXrJoyCons(this)
+        joyConBridge = null
     }
+
+    @Synchronized fun close() { pause(); if (auraJoyCons) orientation.close() }
+
+    @Synchronized fun nativeJoyConState(): IntArray? =
+        if (auraJoyCons && (!resumed || !focused)) null else joyConState()
 
     @Synchronized fun focus(active: Boolean) {
         if (focused == active) return
@@ -71,14 +131,59 @@ internal class XrGamepadInput(context: Context, private val bridge: () -> PadBri
 
     private fun release() {
         menu.clear()
+        joyCons.forEach { it?.release() }
         bridge()?.releaseAll()
     }
 
+    @Synchronized fun joyConState(): IntArray {
+        val state = IntArray(XrJoyConSnapshot.SIZE)
+        if (!auraJoyCons || !resumed || !focused) return state
+        val now = nowNs()
+        val preferences = AuraXrSettings.read(preferencesContext)
+        val options = (if (preferences.joyCon6Dof) XrJoyConSnapshot.POSITIONAL_TRACKING else 0) or
+            (if (preferences.joyCon6Dof && preferences.cameraGuidedCalibration) XrJoyConSnapshot.OPTICAL_HEADING else 0)
+        for (side in joyCons.indices) {
+            val hand = joyCons[side] ?: continue
+            val base = side * XrJoyConSnapshot.STRIDE
+            state[base + XrJoyConSnapshot.BUTTONS] = JOYCON_CONNECTED or options or hand.buttons.buttons(now) { orientation.recenter(side) }
+            state[base + XrJoyConSnapshot.STICK_X] = hand.stickX
+            state[base + XrJoyConSnapshot.STICK_Y] = hand.stickY
+            val sample = orientation.snapshot(side)
+            state[base + XrJoyConSnapshot.EPOCH] = sample.epoch
+            state[base + XrJoyConSnapshot.TIME_LOW] = sample.timeNs.toInt()
+            state[base + XrJoyConSnapshot.TIME_HIGH] = (sample.timeNs ushr 32).toInt()
+            state[base + XrJoyConSnapshot.ANGULAR_SPEED] = sample.angularSpeed.toRawBits()
+            state[base + XrJoyConSnapshot.RECENTER_SEQUENCE] = sample.recenterSequence
+            if (sample.fresh(nowNs())) {
+                state[base + XrJoyConSnapshot.QUATERNION_X] = sample.rotation.x.toRawBits()
+                state[base + XrJoyConSnapshot.QUATERNION_Y] = sample.rotation.y.toRawBits()
+                state[base + XrJoyConSnapshot.QUATERNION_Z] = sample.rotation.z.toRawBits()
+                state[base + XrJoyConSnapshot.QUATERNION_W] = sample.rotation.w.toRawBits()
+                state[base + XrJoyConSnapshot.FRESH] = 1
+            }
+        }
+        return state
+    }
+
     @Synchronized fun key(event: KeyEvent): Boolean {
+        val side = hybridSide(event.device)
+        if (side >= 0) {
+            if (!resumed || !focused) return true
+            val hand = joyCon(event.deviceId, side) ?: return true
+            if (JoyCon.vrButton(side, event.scanCode) == 0) return true
+            if (event.isCanceled) hand.buttons.cancel(event.scanCode)
+            else if (event.action == KeyEvent.ACTION_UP ||
+                (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0)) {
+                hand.buttons.key(event.scanCode, event.action == KeyEvent.ACTION_DOWN, nowNs()) { orientation.recenter(side) }
+            }
+            return true
+        }
         val normalized = JoyCon.normalize(event)
         if (!isController(normalized.device) || !PadBridge.isControllerKeyEvent(normalized)) return false
         if (!resumed || !focused) return true
+        if (menuOpen) return true
         val pad = bridge() ?: return true
+        if (JoyCon.side(normalized.device) >= 0) return pad.onKeyEvent(normalized)
         val result = menu.key(normalized.deviceId, normalized.keyCode, normalized.action, normalized.repeatCount)
         if (result.request) {
             // The first chord key may already be in the guest; release it before the VR menu pulse.
@@ -94,8 +199,19 @@ internal class XrGamepadInput(context: Context, private val bridge: () -> PadBri
     }
 
     @Synchronized fun motion(event: MotionEvent): Boolean {
+        val device = event.device
+        val side = hybridSide(device)
+        if (side >= 0) {
+            if (!resumed || !focused || !event.isFromSource(InputDevice.SOURCE_JOYSTICK) ||
+                event.actionMasked != MotionEvent.ACTION_MOVE) return true
+            val hand = joyCon(event.deviceId, side) ?: return true
+            val axes = JoyCon.stickAxes(side, device!!, event.source)
+            hand.stick(event.getAxisValue(axes[0]), -event.getAxisValue(axes[1]))
+            return true
+        }
         if (!PadBridge.isControllerMotionEvent(event) || !isController(event.device)) return false
         if (!resumed || !focused) return true
+        if (menuOpen) return true
         return bridge()?.onMotionEvent(event) ?: true
     }
 
@@ -107,21 +223,52 @@ internal class XrGamepadInput(context: Context, private val bridge: () -> PadBri
     @Synchronized override fun onInputDeviceRemoved(deviceId: Int) {
         if (!resumed) return
         menu.remove(deviceId)
+        removeJoyCon(deviceId)
         bridge()?.onDeviceRemoved(deviceId)
     }
     @Synchronized override fun onInputDeviceChanged(deviceId: Int) {
         if (!resumed) return
         menu.remove(deviceId)
+        joyCons.filterNotNull().filter { it.deviceId == deviceId }.forEach { it.release() }
         bridge()?.onDeviceRemoved(deviceId)
         syncControllers()
     }
 
     private fun syncControllers() {
-        val pad = bridge() ?: return
-        for (id in manager.inputDeviceIds) {
-            if (!isController(manager.getInputDevice(id))) pad.onDeviceRemoved(id)
+        val devices = manager.inputDeviceIds.map(manager::getInputDevice).filterNotNull()
+        val pad = bridge()
+        if (auraJoyCons) {
+            for (side in joyCons.indices) {
+                val current = joyCons[side]
+                val found = devices.firstOrNull { it.id == current?.deviceId && hybridSide(it) == side }
+                    ?: devices.firstOrNull { hybridSide(it) == side }
+                if (current?.deviceId != found?.id) joyCons[side] = found?.let { JoyConState(it.id, side) }
+            }
+            orientation.devices(Array(2) { side -> joyCons[side]?.deviceId?.let(manager::getInputDevice) })
+            if (joyConBridge !== pad) {
+                joyConBridge?.releaseXrJoyCons(this)
+                joyConBridge = pad
+                pad?.claimXrJoyCons(this)
+            }
         }
-        pad.syncConnectedControllers(::isController)
+        if (pad == null) return
+        for (device in devices) {
+            if (!isController(device) || hybridSide(device) >= 0) pad.onDeviceRemoved(device.id)
+        }
+        pad.syncConnectedControllers { isController(it) && hybridSide(it) < 0 }
+    }
+
+    private fun hybridSide(device: InputDevice?): Int = if (auraJoyCons) JoyCon.side(device) else -1
+
+    private fun joyCon(deviceId: Int, side: Int): JoyConState? {
+        if (joyCons[side]?.deviceId != deviceId) syncControllers()
+        return joyCons[side]?.takeIf { it.deviceId == deviceId }
+    }
+
+    private fun removeJoyCon(deviceId: Int) {
+        if (!auraJoyCons) return
+        for (side in joyCons.indices) if (joyCons[side]?.deviceId == deviceId) joyCons[side] = null
+        orientation.devices(Array(2) { side -> joyCons[side]?.deviceId?.let(manager::getInputDevice) })
     }
 
     private fun logDevices() {
@@ -133,17 +280,26 @@ internal class XrGamepadInput(context: Context, private val bridge: () -> PadBri
     }
 
     fun nativeMotion(device: Int, source: Int, action: Int, downTime: Long, eventTime: Long, axes: FloatArray): Boolean {
-        if (axes.size != AXES.size) return false
-        val coords = MotionEvent.PointerCoords().apply {
-            for (i in AXES.indices) setAxisValue(AXES[i], axes[i])
-        }
-        val event = MotionEvent.obtain(downTime, eventTime, action, 1,
-            arrayOf(MotionEvent.PointerProperties().apply { id = 0 }), arrayOf(coords),
-            0, 0, 1f, 1f, device, 0, source, 0)
+        val event = nativeMotionEvent(device, source, action, downTime, eventTime, axes) ?: return false
         return try { motion(event) } finally { event.recycle() }
     }
 
     companion object {
+        internal fun nativeMotionEvent(device: Int, source: Int, action: Int, downTime: Long,
+                                       eventTime: Long, axes: FloatArray): MotionEvent? {
+            if (axes.size != AXES.size) return null
+            val coords = MotionEvent.PointerCoords().apply {
+                for (i in AXES.indices) setAxisValue(AXES[i], axes[i])
+            }
+            return MotionEvent.obtain(downTime, eventTime, action, 1,
+                arrayOf(MotionEvent.PointerProperties().apply { id = 0 }), arrayOf(coords),
+                0, 0, 1f, 1f, device, 0, source, 0)
+        }
+
+        internal const val JOYCON_CONNECTED = 1 shl 6
+        private fun stickValue(value: Float): Int =
+            if (value.isFinite()) (value.coerceIn(-1f, 1f) * 32767).roundToInt() else 0
+
         internal fun isController(device: InputDevice?): Boolean {
             if (!PadBridge.isFromController(device) || device == null) return false
             if (device.supportsSource(InputDevice.SOURCE_GAMEPAD) || device.motionRanges.isEmpty()) return true

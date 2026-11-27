@@ -20,6 +20,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowBuild
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], qualifiers = "w1200dp-h752dp-land", application = android.app.Application::class)
@@ -42,6 +43,23 @@ class SteamHomeHeadsetTest {
         compose.onNodeWithTag("drop-open").performClick()
         settle()
         compose.onNodeWithTag("drop-close").assertExists()
+    }
+
+    @Test fun auraSteamVrSettingsIncludeTheDevicePaneWithoutUsbGlasses() {
+        ShadowBuild.setManufacturer("XREAL")
+        ShadowBuild.setModel("Android XR Puck")
+        ShadowBuild.setDevice("axrpuck")
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        org.robolectric.Shadows.shadowOf(context.packageManager)
+            .setSystemFeature("android.software.xr.api.openxr", true)
+        headset(GlassesState())
+        show()
+        compose.onNodeWithTag("drop-open").performClick()
+        settle()
+        compose.onNodeWithTag("aura-view-zoom").assertExists()
+        compose.onNodeWithTag("setting-aura-joycon-6dof").assertExists()
+        compose.onNodeWithTag("setting-aura-camera-calibration").assertIsNotEnabled()
+        compose.onNodeWithTag("setting-glasses-game").assertDoesNotExist()
     }
 
     @Test fun nothingShowsUntilAHeadsetIsConnected() {

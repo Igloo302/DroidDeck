@@ -72,11 +72,23 @@ inline bool Heading(const Quat &q, double *radians) {
     return true;
 }
 
+inline double HeadHeading(const Quat &q) {
+    double yaw = 0;
+    if (Heading(q, &yaw)) return yaw;
+    const Vec3 right = Rotate(q, {1, 0, 0});
+    return std::atan2(-right.z, right.x);
+}
+
 class ArmModel {
 public:
     explicit ArmModel(bool right) : side_(right ? 1.0 : -1.0) {}
 
     void Reset() { torsoSet_ = false; }
+
+    static Vec3 RestPosition(bool right, const Vec3 &head, double yaw) {
+        const Vec3 elbow{kRestElbow.x * (right ? 1.0 : -1.0), kRestElbow.y, kRestElbow.z};
+        return head + Rotate(AboutY(yaw), elbow + kForearm + kWrist);
+    }
 
     Vec3 Update(const Vec3 &head, const Quat &headRotation, const Quat &controller, double angularSpeed, double dt) {
         Vec3 gaze = Rotate(headRotation, {0.0, 0.0, -1.0});
@@ -99,18 +111,19 @@ public:
         const double elevation = std::asin(std::clamp(forward.y, -1.0, 1.0)) * 180.0 / M_PI;
         const Quat swing = FromTo({0.0, 0.0, -1.0}, forward);
         const double extension = std::clamp((elevation - kMinExtension) / (kMaxExtension - kMinExtension), 0.0, 1.0);
-        const Vec3 elbow = Vec3{0.195 * side_, -0.5, -0.005} + Vec3{-0.13 * side_, 0.14, -0.08} * extension;
+        const Vec3 elbow = Vec3{kRestElbow.x * side_, kRestElbow.y, kRestElbow.z} + Vec3{-0.13 * side_, 0.14, -0.08} * extension;
         const double suppression = 1.0 - std::pow(AngleDegrees(swing) / 180.0, 6.0);
         const double share = ((1.0 - kElbowBend) + kElbowBend * extension * kExtensionWeight) * suppression;
         const Quat lerp = Nlerp({}, swing, share);
         const Quat elbowRotation = torso * Conjugate(lerp) * swing;
         const Quat wristRotation = elbowRotation * lerp;
         const Vec3 elbowAt = head + Rotate(torso, elbow);
-        const Vec3 wristAt = elbowAt + Rotate(elbowRotation, {0.0, 0.0, -0.25});
-        return wristAt + Rotate(wristRotation, {0.0, 0.0, -0.05});
+        const Vec3 wristAt = elbowAt + Rotate(elbowRotation, kForearm);
+        return wristAt + Rotate(wristRotation, kWrist);
     }
 
 private:
+    static constexpr Vec3 kRestElbow{0.195, -0.5, -0.005}, kForearm{0.0, 0.0, -0.25}, kWrist{0.0, 0.0, -0.05};
     static constexpr double kMinExtension = 7.0, kMaxExtension = 60.0, kElbowBend = 0.6, kExtensionWeight = 0.4;
     double side_;
     bool torsoSet_ = false;

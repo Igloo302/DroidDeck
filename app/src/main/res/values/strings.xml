@@ -3242,6 +3242,18 @@
     <string name="setup_tab_glasses">Smart glasses</string>
     <string name="setup_glasses_scope">Display and head-tracking settings are shared across DroidDeck menus, games and desktop sessions.</string>
     <string name="setup_glasses_connect">Connect smart glasses to change their display and tracking settings. Your saved settings are kept when you disconnect.</string>
+    <string name="aura_settings_title" translatable="false">AURA</string>
+    <string name="aura_settings_scope">SteamVR view and Joy-Con tracking settings for this AURA headset. Changes apply while SteamVR is running.</string>
+    <string name="aura_view_zoom">SteamVR view zoom</string>
+    <string name="aura_view_zoom_hint" formatted="false">Magnify the SteamVR view. 100% keeps the normal field of view.</string>
+    <string name="aura_joycon_group">AURA Joy-Cons</string>
+    <string name="aura_joycon_6dof">Experimental Joy-Con 6DoF</string>
+    <string name="aura_joycon_6dof_hint">Use hand tracking for controller position while Joy-Con motion controls rotation. Off uses 3DoF rotation tracking with an estimated controller position and no camera assistance.</string>
+    <string name="aura_camera_calibration">Camera-guided calibration</string>
+    <string name="aura_camera_calibration_hint">Use a calibrated hand-tracking reference to correct Joy-Con heading drift. Hold Capture (left) or Home (right) with that hand visible and steady to learn the reference.</string>
+    <string name="aura_camera_calibration_requires_6dof">Requires Experimental Joy-Con 6DoF. Camera-guided calibration is inactive while 6DoF is off.</string>
+    <string name="aura_joycon_recenter">Recenter Joy-Cons</string>
+    <string name="aura_joycon_recenter_hint">Always available: point a Joy-Con forward and hold Capture (left) or Home (right) for 0.8 seconds. With camera-guided calibration on, also keep that hand visible and steady.</string>
     <string name="setup_ready">Ready to play</string>
     <string name="setup_not_ready">Not ready to play yet</string>
     <string name="setup_ready_runtime">runtime %1$s</string>

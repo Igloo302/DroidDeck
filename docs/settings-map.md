@@ -34,6 +34,9 @@ Links of the form `droiddeck://settings/<section>` open a Settings section direc
 | Host name | Settings › Performance (`droiddeck://settings/performance`) | name |
 | Controller | Settings › Controller (`droiddeck://settings/controller`) | gamepad, buttons, mapping, profile, remap |
 | Smart glasses | Settings › Smart glasses (`droiddeck://settings/glasses`) | xreal, viture, vr, ar |
+| SteamVR view zoom | Settings › Smart glasses (`droiddeck://settings/glasses`) | aura, steamvr, zoom, fov, field of view, magnification |
+| Experimental Joy-Con 6DoF | Settings › Smart glasses (`droiddeck://settings/glasses`) | aura, joy-con, 6dof, tracking, experimental |
+| Camera-guided calibration | Settings › Smart glasses (`droiddeck://settings/glasses`) | aura, joy-con, camera, calibration, recenter |
 | Theme | Settings › Launcher (`droiddeck://settings/launcher`) | color, dark |
 | App scale | Settings › Launcher (`droiddeck://settings/launcher`) | size, zoom |
 | App icon | Settings › Launcher (`droiddeck://settings/launcher`) |  |

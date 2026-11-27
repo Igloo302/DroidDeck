@@ -29,6 +29,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
+import org.robolectric.shadows.ShadowBuild
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], qualifiers = "w1200dp-h752dp-land", application = Application::class)
@@ -78,6 +79,20 @@ class GlobalGlassesSettingsTest {
         compose.onNodeWithTag("setting-logs").assertExists()
         openGlasses()
         compose.onNodeWithText(text(R.string.setup_glasses_connect)).assertExists()
+    }
+
+    @Test fun auraSettingsAreReachableFromGlobalSetupWithoutUsbGlasses() {
+        ShadowBuild.setManufacturer("XREAL")
+        ShadowBuild.setModel("Android XR Puck")
+        ShadowBuild.setDevice("axrpuck")
+        show()
+        openGlasses()
+        compose.onNodeWithTag("setup-glasses-tab-aura").assertExists()
+        compose.onNodeWithTag("aura-view-zoom").assertExists()
+        compose.onNodeWithTag("setting-aura-joycon-6dof").assertExists()
+        compose.onNodeWithTag("setting-aura-camera-calibration").assertExists()
+        compose.onNodeWithText(text(R.string.setup_glasses_connect)).assertDoesNotExist()
+        compose.onNodeWithTag("setting-glasses-game").assertDoesNotExist()
     }
 
     @Test fun hotplugKeepsTheGlobalPageAndSharedTrackingPreferences() {
