@@ -49,7 +49,8 @@
   "debian-image": {
     "script": "tools/components/recipes/debian-image.sh",
     "inputs": [
-      "tools/components/recipes/debian-image.sh"
+      "tools/components/recipes/debian-image.sh",
+      "tools/linuxfs/debian-image.env"
     ],
     "outputs": []
   },
